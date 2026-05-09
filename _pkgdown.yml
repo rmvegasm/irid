@@ -50,6 +50,7 @@ reference:
     desc: Re-exported Shiny reactive primitives
     contents:
       - reactiveVal
+      - reactiveStore
 
 navbar:
   components:
