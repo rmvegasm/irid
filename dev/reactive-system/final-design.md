@@ -6,7 +6,7 @@
 
 ## Summary
 
-irid's state and rendering model is built on five concepts:
+irid's state and rendering model is built on six concepts:
 
 1. **`reactiveStore`** — hierarchical reactive state.
 2. **Auto-bind** — state-binding props (`value`, `checked`, `selected`)
@@ -15,7 +15,8 @@ irid's state and rendering model is built on five concepts:
    The single mechanism for validation, transforms, side effects, and
    read-only views at component boundaries.
 4. **`Each`** — collection iteration with per-item mini-stores.
-5. **`.event` config** — element-level timing and transport.
+5. **`Switch`** — variant dispatch with mini-store decomposition.
+6. **`.event` config** — element-level timing and transport.
 
 Every piece of state — store branch, store leaf, standalone `reactiveVal`,
 per-item accessor inside `Each` — is a **unified callable**: `x()` reads,
@@ -126,6 +127,40 @@ state$todos(c(state$todos(), list(list(id = 3L, text = "New", done = FALSE))))
 ```
 
 Fine-grained per-item reactivity is the responsibility of `Each`, not the store.
+
+### Variant leaves
+
+A bare named list at a leaf position auto-classifies as a *branch* — fixed
+shape at construction. To store a single record whose shape depends on a
+discriminator field (a tagged union), wrap it in `I()`. `I()` is the
+construction-time opt-out from branch classification; the named list is held
+as the leaf's value verbatim:
+
+```r
+state <- reactiveStore(list(
+  result = I(list(success = TRUE))
+))
+```
+
+The leaf accepts any value on write, including a different variant shape.
+Subsequent writes do not need `I()` — the leaf has already been classified
+and accepts records directly:
+
+```r
+state$result(list(success = FALSE, reasons = list("Email required")))
+state$result()  # list(success = FALSE, reasons = list("Email required"))
+```
+
+Reads return the record verbatim, with no automatic decomposition. The leaf is
+a single `reactiveVal` — any change fires every observer of the leaf. To get
+fine-grained per-field reactivity *and* shape-dependent rendering, consume the
+leaf with `Switch` in dispatch mode, which projects it as a mini-store over the
+current variant. See **`Switch`** for the consumption mechanics.
+
+This is the storage half of the variant pattern. Without `Switch`, the leaf
+behaves as an opaque structured value — useful in its own right when you want
+to treat the record atomically (config blobs, third-party objects), but it
+gives you no decomposition.
 
 ### Internal design
 
@@ -561,19 +596,22 @@ Writes flow through a two-level synthetic setter chain: inner scalar accessor
 → mini-store leaf → outer mini-store → parent collection. Each level uses the
 same one-way mechanism.
 
-### Discriminated unions
+### Discriminated unions in collections
 
-When collection items follow a tagged union — different shapes for different
-variants — use a compound `by` key that includes the discriminator:
+When *collection items* follow a tagged union — different shapes for different
+variants — use a compound `by` key that includes the discriminator. (For a
+*single* variant-shaped value, store it as an `I()`-leaf and dispatch with
+`Switch` instead — see **`Switch`**. The mechanics below are for collections
+only.)
 
 ```r
 Each(state$questions, by = \(q) paste0(q$id, "_", q$qtype), \(question) {
   tags$div(
     # ... common fields ...
-    Match(
-      Case(\() question$qtype() == "text",   TextQuestion(question)),
-      Case(\() question$qtype() == "scale",  ScaleQuestion(question)),
-      Case(\() question$qtype() == "choice", ChoiceQuestion(question))
+    Switch(question,
+      Case(\(q) q$qtype == "text",   \(q) TextQuestion(q)),
+      Case(\(q) q$qtype == "scale",  \(q) ScaleQuestion(q)),
+      Case(\(q) q$qtype == "choice", \(q) ChoiceQuestion(q))
     )
   )
 })
@@ -606,13 +644,14 @@ replaces the slot in the parent collection atomically. The reconciler then
 sees the old compound key gone and the new one appearing — full teardown and
 fresh mount with the correct shape for the new variant.
 
-Because the component is remounted on type change, the `Match` condition is
-stable for the lifetime of each mini-store — it never flips. But a reactive
-context is still required to read the value, so `Match`/`Case` is needed:
+Because the component is remounted on type change, each `Case`'s predicate is
+stable for the lifetime of its mini-store — it never flips. `Switch` is still
+required to evaluate the predicate in a reactive context and to mount the
+correct branch:
 
 ```r
-Match(
-  Case(\() question$qtype() == "choice", ChoiceConfig(question))
+Switch(question,
+  Case(\(q) q$qtype == "choice", \(q) ChoiceConfig(q))
 )
 # $options is always present here — the mini-store shape guarantees it
 ```
@@ -626,6 +665,149 @@ No special case in `Each` — it sees a callable either way.
 ### When mini-stores are not created
 
 - **Scalar items** get a per-item `reactiveVal`, not a store.
+
+---
+
+## `Switch`
+
+Renders one of several alternatives based on a reactive value. The leading
+callable's value is projected as a mini-store and made available to each
+`Case`; Cases match the bound value via predicate or literal; the first true
+Case's body mounts. Active cases are mounted; inactive cases are destroyed.
+
+```r
+Switch(state$result,
+  Case(\(r) r$success,  \() tags$p("Submitted")),
+  Case(\(r) !r$success, \(r) tags$ul(
+    Each(r$reasons, \(reason, i) tags$li(\() reason()))
+  )),
+  Default(\() tags$p("Unknown"))
+)
+```
+
+- The leading argument is any callable — most commonly an `I()`-leaf, a
+  `reactive()`, a `reactiveVal`, a mini-store handed in from outside, or an
+  inline choice fn (see below).
+- `Case(predicate, body)` — both `predicate` and `body` are independently
+  arity-polymorphic, picked by the user based on whether they reference the
+  bound value. See the predicate and body forms below.
+- `Default(body)` matches when no `Case` does. Sugar for
+  `Case(\() TRUE, body)` placed at the position of `Default`. `body` follows
+  the same arity rule as Case.
+
+#### Predicate forms
+
+| Predicate | Means |
+|---|---|
+| `\(v) cond` | Function of the bound value, evaluated reactively |
+| `\() cond` | Function ignoring the binding, evaluated reactively (cross-cutting predicate) |
+| literal value | Equality match against bound value via `identical` |
+
+The two callable forms are both reactive — any reactive read inside the
+predicate (the bound value via `v$field`, an external reactive like
+`debug_mode()`, anything) becomes a dependency, and the predicate chain
+re-evaluates when any dependency changes. The arity (`\()` vs `\(v)`) is
+purely about whether the predicate references the bound value as a parameter,
+not whether it is reactive. A literal `Case("dark", ...)` enters the reactive
+graph only via the bound value — nothing inside the literal is reactive.
+
+#### Body forms
+
+| Body | Means |
+|---|---|
+| `\(v) body` | Function of the bound mini-store / leaf accessor |
+| `\() body` | Function ignoring the binding |
+
+Bodies are functions, not tag trees, because `Switch` uses mount-and-destroy
+semantics on case transitions: inactive cases are torn down with their
+reactives, and reactivation must construct a fresh instance. There is no tag
+tree to remount — the closures it referenced are gone. The function form is
+what the runtime calls each time the case activates.
+
+#### Cross-cutting predicates
+
+The `\()` predicate form covers cases that ignore the bound value and
+short-circuit on external state — a debug override, an auth check, a feature
+flag — alongside record-shape Cases:
+
+```r
+Switch(state$result,
+  Case(\() debug_mode(),  \(r) DebugView(r)),
+  Case(\() !auth$ok(),    \() LoginPrompt()),
+  Case(\(r) r$success,    \() Submitted()),
+  Case(\(r) !r$success,   \(r) ErrorView(r$reasons))
+)
+```
+
+The first two cases match on reactive reads outside `state$result` and
+short-circuit before any record-shape predicate runs. Both `debug_mode()`
+and `auth$ok()` become dependencies of the Switch — flipping either causes
+re-evaluation.
+
+For record dispatch — variants identified by a discriminator field — predicates
+are the natural form (they can inspect fields). Literal Cases are occasionally
+useful for whole-record presets, but more commonly drive *scalar* dispatch
+(see below).
+
+On active-case change, the old case's mini-store and DOM are torn down and
+the new case is mounted with a fresh mini-store over the current shape — the
+same reconcile mechanism `Each(by = ...)` uses for keyed items, applied to a
+single record. Because the case is remounted on transition, the mini-store's
+shape is fixed for its lifetime: every field referenced inside a `Case` body
+is guaranteed present while that case is active.
+
+### Scalar dispatch
+
+A leading callable that returns a scalar works the same way — bodies receive
+the bare leaf accessor instead of a mini-store. With literal Cases, scalar
+dispatch reads cleanly:
+
+```r
+Switch(state$theme,
+  Case("dark",  \() DarkUI()),
+  Case("light", \() LightUI())
+)
+```
+
+Bodies are zero-arg here because the literal already selected the variant —
+nothing to bind. Predicate Cases work too when the rule is more than equality:
+
+```r
+Switch(state$score,
+  Case(\(s) s >= 90, \() tags$p("A")),
+  Case(\(s) s >= 80, \() tags$p("B")),
+  Default(\() tags$p("Try again"))
+)
+```
+
+### Multi-branch over unrelated state — choice fn
+
+Cases dispatch on a *single* bound value, but the bound value can itself be
+a synthesized record. Use a choice function as the leading callable to fold
+unrelated reactive conditions into a tagged variant on the fly:
+
+```r
+Switch(\() {
+  if (state$loading()) list(tag = "loading")
+  else if (state$error() != "") list(tag = "error", error = state$error())
+  else list(tag = "data", items = state$data())
+},
+  Case(\(r) r$tag == "loading", \() Spinner()),
+  Case(\(r) r$tag == "error",   \(r) ErrorMsg(r$error)),
+  Case(\(r) r$tag == "data",    \(r) ItemList(r$items))
+)
+```
+
+Two things to note. First, this is the same dispatch-mode machinery — there
+is no separate "predicate mode" in `Switch`. Second, once you've written the
+choice fn you've effectively defined a variant; whenever the synthesized
+record is worth keeping as actual state, lift it to an `I()`-leaf and let the
+store hold it. The choice-fn pattern is the bridge between unstructured
+reactive state and the variant-leaf shape.
+
+A predicate-only mode (a `Switch(...Cases)` form without a leading callable)
+is intentionally absent — the choice-fn pattern covers it more cleanly. Adding
+it later would be a pure additive extension, no breaking change.
 
 ---
 
@@ -797,6 +979,7 @@ Not legitimate uses:
 |--------------------------------------|---------------------------------------------------|
 | Hierarchical reactive state          | `reactiveStore`                                   |
 | Single reactive value                | `reactiveVal`                                     |
+| Variant-shaped leaf (storage)        | `I()`-wrapped named list at a leaf position       |
 | Derived state                        | `reactive()`                                      |
 | Two-way DOM binding                  | Auto-bind (`value`, `checked`, `selected`)        |
 | Write-path control                   | `reactiveProxy`                                   |
@@ -804,6 +987,7 @@ Not legitimate uses:
 | Discrete user actions                | Event callbacks (`onClick`, `onSubmit`, ...)      |
 | Collection iteration (fine-grained)  | `Each` with mini-stores                           |
 | Branch iteration (static shape)      | `lapply(branch, fn)` / `imap(branch, fn)`        |
+| Predicate / variant dispatch         | `Switch` with `Case` / `Default`                   |
 | Event timing                         | `.event` (element-level config)                   |
 
 ### The common case

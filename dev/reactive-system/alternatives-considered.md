@@ -445,6 +445,41 @@ lens/focus work.
 
 ---
 
+## E. Pattern dispatch alternatives
+
+### E1. `Switch` predicate-only mode (no leading callable)
+
+**What:** A second `Switch` form, `Switch(...Cases)` with no leading callable,
+where Cases evaluate ordered zero-arg predicates as an `if/else if` chain. No
+value bound, no mini-store decomposition.
+
+**Why considered:** The natural way to express multi-branch conditional
+rendering over independent reactive conditions (auth + viewport + flag, or the
+classic loading/error/data tri-state). Mirrors the existing predicate-mode
+`Match` API in `primitives.R`.
+
+**Why rejected:** The choice-fn pattern in dispatch mode covers everything
+predicate mode would have, and is strictly better:
+
+- Forces explicit naming of the variants (the choice fn returns a tagged
+  record, so each variant gets a name).
+- Produces a binding the body can use, even when assembled from disparate
+  state.
+- Pressure-tests state modeling — once you've written the choice fn, you've
+  effectively defined a variant; lifting it to an `I()`-leaf is mechanical
+  if it deserves to live as actual state.
+
+**Key discussion points:** Two modes were briefly kept on grounds of
+"predicate mode is cheap to support — it's just `Switch` without binding."
+That argument inverts under forward-compat analysis: if predicate mode is a
+pure additive extension (which it is — `Switch` would just gain a
+first-arg-type check, no breaking change to existing dispatch-mode code),
+then it's *also* cheap to **add later**. Defer the speculative mode until a
+real app shows it's needed; ship narrow now. The choice-fn pattern is
+sufficient for everything seen so far.
+
+---
+
 ## Appendix: Store design stress test (April 2026)
 
 Before finalising the store design, a blind stress test was run to validate that
