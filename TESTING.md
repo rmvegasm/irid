@@ -11,8 +11,8 @@ static HTML.
 - [ ] Reactive attribute is extracted into `$bindings` with correct `id`, `attr`, `fn`
 - [ ] Event handler (`onInput`, `onClick`, etc.) is extracted into `$events`
 - [ ] Event name conversion: `onInput` → `input`, `onClick` → `click` (strip `on`, lowercase)
-- [ ] Bare function handlers are wrapped in `event_immediate()`
-- [ ] `event_throttle`/`event_debounce` handlers preserve `mode`, `ms`, `leading`, `coalesce`
+- [ ] Bare function handlers follow the per-event default rule (`onInput` → debounce(200), everything else → immediate)
+- [ ] Element-level `.event` config supplies `mode`, `ms`, `leading`, `coalesce` to every event entry on the element
 - [ ] Element with existing `id` attribute keeps it (not overwritten by auto-ID)
 - [ ] Element with both reactive attrs and events shares one ID
 - [ ] Multiple event handlers on one element (e.g. both `onInput` and `onClick`)
@@ -111,8 +111,93 @@ is correctly propagated from R to the client.
 - [ ] `event_immediate()` sends `mode = "immediate"` with `coalesce` flag
 - [ ] `event_throttle()` sends `mode = "throttle"` with `ms`, `leading`, `coalesce`
 - [ ] `event_debounce()` sends `mode = "debounce"` with `ms`, `coalesce`
-- [ ] `prevent_default` flag is forwarded to the client
-- [ ] Bare function defaults to `event_immediate(coalesce = FALSE)`
+- [ ] `.prevent_default = TRUE` is forwarded to every event entry on the client
+- [ ] `event_*()` constructors return config structs (no handler argument)
+
+## Auto-bind (state-binding props)
+
+Verify that callable `value`/`checked` props produce both a read binding and
+a write event entry, and that the corresponding DOM event fires the write
+back through the callable. Auto-bind aligns to the DOM IDL: prop name and
+event field name match (`value` ↔ `e$value`, `checked` ↔ `e$checked`).
+`<select>` binds via `value` (its DOM IDL property); radios bind via
+`checked` per-element.
+
+### `process_tags` extraction
+
+- [ ] `value = reactiveVal()` on text input produces both a binding (`attr = "value"`) and a synthetic `input` event entry with handler `\(e) val(e$value)`
+- [ ] `value = reactiveVal()` on `<select>` produces both a binding and a synthetic `input` event entry
+- [ ] `checked = reactiveVal()` on checkbox produces both a binding and a synthetic `change` event entry with handler `\(e) val(e$checked)`
+- [ ] `checked = reactiveVal()` on `<input type="radio">` produces both a binding and a synthetic `change` event entry
+- [ ] 0-arg callable in `value` produces both a binding and a synthetic event entry with a no-op handler (write-attempt + force-send echoes current value back)
+- [ ] Auto-bind synthetic event coexists with explicit `onInput`/`onChange` on the same element
+
+### Write-back
+
+- [ ] `value = reactiveVal()` on text input — typing fires writes; `rv()` returns the typed value after flush
+- [ ] `value = state$leaf` (store leaf) — typing fires writes
+- [ ] `value = reactiveProxy(get = ..., set = ...)` — `set` is called on write
+- [ ] `value = reactiveProxy(get = ...)` — writes silently dropped
+- [ ] `value = \() expr()` (0-arg) — no write fires; client snaps back via the optimistic-update protocol
+- [ ] `value = state$theme` on `<select>` — selection fires `rv(value)`
+- [ ] `checked = reactiveVal(FALSE)` on checkbox — toggle fires `rv(TRUE/FALSE)`
+- [ ] `checked = \() group() == "a"` on a radio (per-element boolean) — selecting fires through; deselected radio does not write (gated by `shouldSkip`)
+- [ ] Auto-bind + explicit `onInput` on same element — both run
+- [ ] Focused-input echo skipping continues to work for auto-bind value updates
+
+### Collision merge & handler ordering
+
+When auto-bind synthetic and explicit `on*` collide on the same DOM event,
+process_tags merges them into one event entry (one observer, one JS
+listener). Auto-bind handlers run before explicit `on*` handlers; within
+each tier, source-attribute order is preserved.
+
+- [ ] `value = rv` + `onInput` on same `<input>` produces a single event
+      entry on `input` (not two)
+- [ ] `value = rv` + `onChange` on same `<select>` does NOT merge — `value`'s
+      synthetic event is `input`, the explicit handler is `change`, so they
+      stay as two separate event entries
+- [ ] `checked = rv` + `onChange` on same checkbox produces a single event
+      entry on `change`
+- [ ] No collision (e.g. `value = rv` + `onClick`) leaves the two as
+      separate event entries
+- [ ] Merged composed handler has `length(formals(handler)) == 2L` and is
+      called by mount as `handler(event_obj, id)`
+- [ ] Auto-bind write lands before explicit `on*` runs, regardless of
+      attribute source order (`value = rv, onInput = h` and
+      `onInput = h, value = rv` both have the explicit handler observe
+      the post-write state)
+- [ ] Two explicit handlers on the same DOM event (rare) compose in
+      source order
+- [ ] Merged entry's timing is resolved by DOM event name only, the same
+      as if no autobind were involved (e.g. `value = rv` + `onInput` → 
+      `event_debounce(200)`; `checked = rv` + `onChange` → `event_immediate()`)
+- [ ] Explicit-handler arity is preserved through composition
+      (0-arg/1-arg/2-arg source handlers each get their own dispatch)
+
+### Client-side state-binding application
+
+- [ ] `value` on `<select>`: `irid-attr` sets `el.value = msg.value`, picking the matching option
+- [ ] `checked` on `<input type="radio">`: `irid-attr` sets `el.checked = msg.value`
+- [ ] `<select>` write-back listens on `input` (the `value` autobind event)
+- [ ] Radio write-back listens on `change`; only fires when `el.checked === true` (gated by `shouldSkip` to defend against deselect-change)
+
+## `.event` element config
+
+Verify that element-level `.event` and `.prevent_default` props correctly
+configure timing and transport for all events on the element.
+
+- [ ] `.event` and `.prevent_default` are stripped from output HTML attributes
+- [ ] `.event = event_debounce(500)` applies to every event entry on the element (auto-bind synthetic + explicit `on*`)
+- [ ] `.event = list(input = event_debounce(500), keydown = event_immediate())` applies per-event override
+- [ ] Events not present in a `.event` named list fall back to the per-event default rule
+- [ ] `.prevent_default = TRUE` propagates to every event entry on the element
+- [ ] Without `.event`, `input` events (autobind `value` synthetic or explicit `onInput`) default to `event_debounce(200)`
+- [ ] Without `.event`, every other event (autobind `checked` synthetic or any explicit `on*`) defaults to `event_immediate()`
+- [ ] `.event = event_immediate()` on an auto-bound text input overrides the 200ms debounce default
+- [ ] Multiple events on the same element (e.g. `onInput` + `onKeyDown`) share the element's `.event` config
+- [ ] `.event` named-list keys accept either DOM-event form (`input`) or `on`-prop form (`onInput`); both normalize to the lowercase DOM event
+- [ ] Malformed `.event` errors at process time: a non-config / non-list value, an unnamed list, a partially-named list, a list whose entries are not all `irid_event_config`, or a list with duplicate event names after normalization
 
 ## `iridApp` rendering
 
@@ -251,7 +336,7 @@ coordinate with Shiny's binding lifecycle.
 
 ### `irid-attr` property vs attribute dispatch
 
-- [ ] `value`, `disabled`, `checked`, `selected`, `innerHTML` are set as JS properties (not `setAttribute`)
+- [ ] `value`, `disabled`, `checked`, `innerHTML` are set as JS properties (not `setAttribute`)
 - [ ] `textContent` is set via `.textContent` property
 - [ ] Other attributes use `setAttribute()`
 - [ ] `false`/`null` attribute values call `removeAttribute()`

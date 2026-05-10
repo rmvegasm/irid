@@ -20,8 +20,7 @@ Counter <- function(label, count) {
       ),
       tags$input(
         type = "range", min = 0, max = 100,
-        value = count,
-        onInput = \(event) count(event$valueAsNumber)
+        value = reactiveProxy(get = count, set = \(v) count(as.numeric(v)))
       ),
       tags$button(
         class = "btn btn-outline-secondary btn-sm",

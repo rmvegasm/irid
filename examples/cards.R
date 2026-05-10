@@ -47,13 +47,6 @@ App <- function() {
   dataset <- \() all_datasets[[dataset_name()]]
   available <- \() setdiff(names(dataset()), selected_columns())
 
-  # Clear selections when dataset changes
-  observe({
-    dataset_name()
-    selected_columns(character(0))
-    choice("")
-  })
-
   page_fluid(
     tags$h3("Column Cards"),
 
@@ -61,7 +54,10 @@ App <- function() {
     tags$select(
       class = "form-select mb-3",
       value = dataset_name,
-      onChange = \(event) dataset_name(event$value),
+      onChange = \() {
+        selected_columns(character(0))
+        choice("")
+      },
       Each(\() names(all_datasets), \(name) tags$option(value = name, name))
     ),
 

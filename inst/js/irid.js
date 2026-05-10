@@ -1,7 +1,7 @@
 (function() {
   var defined = new Set();
   var sequences = {};  // element id -> latest sent sequence number
-  var PROP_ATTRS = { value: true, disabled: true, checked: true, selected: true, innerHTML: true };
+  var PROP_ATTRS = { value: true, disabled: true, checked: true, innerHTML: true };
   var anchors = new Map();  // id -> { start: CommentNode, end: CommentNode }
   var ANCHOR_RE = /^irid:(s|e):(.+)$/;
   var staleTimeout = null;  // ms before showing stale indicator (null = disabled)
@@ -256,6 +256,18 @@
 
   // --- Event payload construction ---
 
+  // Radios only fire `change` on the newly-checked element in practice,
+  // but gate defensively so a stray deselect-change can't write a stale
+  // value through any `change` listener (auto-bind `checked` synthetic or
+  // explicit `onChange`). Browsers don't fire deselect-change in modern
+  // UAs, so this is invisible in practice but rules out one class of
+  // stale-value bug.
+  function shouldSkip(el, eventName) {
+    return eventName === 'change' &&
+           el.tagName === 'INPUT' && el.type === 'radio' &&
+           !el.checked;
+  }
+
   function buildPayload(e, el, id) {
     var payload = {};
     // Extract all primitive-valued properties from the event object
@@ -351,6 +363,7 @@
     managed[msg.inputId] = s;
 
     el.addEventListener(msg.event, function(e) {
+      if (shouldSkip(el, msg.event)) return;
       if (msg.preventDefault) e.preventDefault();
       s.payload = buildPayload(e, el, msg.id);
       if (!s.timerRunning) {
@@ -404,6 +417,7 @@
     managed[msg.inputId] = s;
 
     el.addEventListener(msg.event, function(e) {
+      if (shouldSkip(el, msg.event)) return;
       if (msg.preventDefault) e.preventDefault();
       s.payload = buildPayload(e, el, msg.id);
       s.timerReady = false;
@@ -438,12 +452,14 @@
       managed[msg.inputId] = s;
 
       el.addEventListener(msg.event, function(e) {
+        if (shouldSkip(el, msg.event)) return;
         if (msg.preventDefault) e.preventDefault();
         s.payload = buildPayload(e, el, msg.id);
         s.maybeSend();
       });
     } else {
       el.addEventListener(msg.event, function(e) {
+        if (shouldSkip(el, msg.event)) return;
         if (msg.preventDefault) e.preventDefault();
         sendPayload(msg.inputId, buildPayload(e, el, msg.id));
       });

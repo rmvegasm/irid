@@ -21,8 +21,8 @@ A callable with class \code{c("reactiveProxy", "reactive", "function")}.
 Builds a callable proxy from a 0-arg \code{get} reader and an optional
 1-arg \code{set} writer. The proxy is itself a callable: \code{proxy()} invokes
 \code{get()}, \code{proxy(value)} invokes \code{set(value)}. Auto-bind treats the
-proxy like any other callable, so it composes with \code{value}/\code{checked}/
-\code{selected} props without any special handling.
+proxy like any other callable, so it composes with \code{value} and
+\code{checked} props without any special handling.
 }
 \details{
 \code{set} is a side-effectful handler, not a pure transform. It receives
@@ -35,6 +35,7 @@ Pass \code{set = NULL} (or omit it) to make the proxy read-only — writes
 are silently dropped. With auto-bind, this lets the input snap back
 to the current value via the optimistic-update protocol.
 
-Proxies compose: a proxy is itself a callable, so another
-\code{reactiveProxy} can use it as its \code{get}.
+Proxies compose: a proxy is itself a callable (0-arg → \code{get}, 1-arg →
+\code{set}), so another \code{reactiveProxy} can use it as either its \code{get} or
+its \code{set}.
 }

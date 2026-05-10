@@ -17,8 +17,7 @@ OldFaithful <- function() {
         tags$label(\() paste0("Number of bins: ", bins())),
         tags$input(
           type = "range", min = "1", max = "50",
-          value = bins,
-          onInput = \(event) bins(as.integer(event$value))
+          value = reactiveProxy(get = bins, set = \(v) bins(as.integer(v)))
         ),
         PlotOutput(\() {
           x <- faithful$waiting
