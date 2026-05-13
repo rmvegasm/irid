@@ -3,25 +3,25 @@
 #' Builds a `reactiveStore`-shaped callable tree that projects a single
 #' record out of a parent collection. Reads route through `get_record()`;
 #' writes (whole-record or per-field synthetic setters) route through
-#' `set_record()`. The mini-store never owns the record's state — the
+#' `set_record()`. The mini-store never owns the record's state -- the
 #' parent collection is the single source of truth.
 #'
 #' Used by `Each` (record items) and `Match` (record bound value) to
 #' project fine-grained leaf reactivity out of a coarse-grained parent.
 #'
-#' Recursive — nested named lists in the initial record become sub-mini-stores
+#' Recursive -- nested named lists in the initial record become sub-mini-stores
 #' (so `mini$user$name(v)` writes through the same chain as
 #' `mini$user(<full-user>)` would).
 #' Each level threads a sub-`get`/`set` pair down the tree; writes at any
 #' depth fan out through the chain of synthetic setters until they reach
 #' the user-supplied `set_record`. Shape uses the same shared
 #' branch-vs-leaf rules as [reactiveStore()] (`is_branch`, `is_bare_list`,
-#' `strip_asis` are reused), and the same recursive [validate_write()]
+#' `strip_asis` are reused), and the same recursive `validate_write()`
 #' enforces "no unknown keys, no missing keys" at every level on
 #' whole-record writes.
 #'
 #' **Shape is strict.** Writes are validated against the keys captured
-#' at construction — same contract as a [reactiveStore()] branch.
+#' at construction -- same contract as a [reactiveStore()] branch.
 #' Callers that need to change a slot's shape reshape the *parent
 #' collection* directly (e.g. for `Each(items, ...)`, write the new
 #' `items()` with the slot already replaced); the outer reconciler
@@ -31,7 +31,7 @@
 #' **Writes replace, like [reactiveStore()].** A branch write must
 #' include every locked key; missing keys are an error. The complete
 #' record is what reaches `set_record`. Per-field writes
-#' (`mini$field(v)`) remain the dedicated single-slot path — use them
+#' (`mini$field(v)`) remain the dedicated single-slot path -- use them
 #' when you want to update one field without naming the rest. Dropping
 #' a field is a parent-level operation: write the reshaped collection
 #' through the source callable (`items(...)`) and the outer reconciler
@@ -42,7 +42,7 @@
 #' walks the tree top-down via each branch's internal `set_internal`,
 #' which recurses to children's `set_internal`; only at leaves does an
 #' actual `reactiveVal` write occur, gated by `identical(old, new)`.
-#' This is what delivers the "only changed fields fire" promise — the
+#' This is what delivers the "only changed fields fire" promise -- the
 #' diff happens inside the projection rather than at the call site, so
 #' callers can't get it wrong.
 #'
@@ -55,13 +55,13 @@
 #'   created against `scope$session` and registered for cleanup so
 #'   `scope$destroy()` tears it down.
 #' @return A callable with class `c("reactiveStore", "reactive", "function")`,
-#'   shaped like a `reactiveStore` branch — `mini()` reads the record,
+#'   shaped like a `reactiveStore` branch -- `mini()` reads the record,
 #'   `mini(record)` writes it, `mini$field()` reads a leaf or sub-branch,
 #'   and `mini$field(v)` writes through the parent.
 #' @keywords internal
 make_mini_store <- function(get_record, set_record, scope) {
   initial <- shiny::isolate(get_record())
-  # Permissive check first — `is_branch` errors on partially-named
+  # Permissive check first -- `is_branch` errors on partially-named
   # lists with a store-construction message that's misleading when the
   # caller is `Each` / `Match`. `is_record` returns FALSE for both
   # unnamed and partial-named, so we can issue the mini-store-specific
@@ -81,7 +81,7 @@ make_mini_store <- function(get_record, set_record, scope) {
     path = ""
   )
 
-  # Single root-level propagator — pushes parent changes down through
+  # Single root-level propagator -- pushes parent changes down through
   # the tree via `set_internal`. Only leaves whose value actually
   # changed fire their observers (each leaf's `set_internal` short-
   # circuits on `identical`). One observer rather than one-per-leaf
@@ -121,7 +121,7 @@ build_mini_node <- function(initial, get_self, set_self, scope, path) {
     child_nodes <- stats::setNames(
       lapply(keys, function(k) {
         force(k)
-        # Sub-projection — narrow get/set to this child's slice. `isolate`
+        # Sub-projection -- narrow get/set to this child's slice. `isolate`
         # so the synthetic setter never subscribes to the parent record.
         # `[[<-` rather than `modifyList` because `modifyList` recurses
         # into matching list-shaped values (replacing a length-2 list
@@ -171,7 +171,7 @@ build_mini_node <- function(initial, get_self, set_self, scope, path) {
     # write, the event observer's force-send echo (which runs before
     # the next flush propagates the parent change back down) reads the
     # stale `rv` and sends the OLD value to the client tagged with the
-    # current sequence — the client treats it as a server transform and
+    # current sequence -- the client treats it as a server transform and
     # overwrites the user's typed value. The propagator that fires on
     # the next flush short-circuits via `identical()` and doesn't
     # re-invalidate.
@@ -193,15 +193,15 @@ build_mini_node <- function(initial, get_self, set_self, scope, path) {
 # `set_internal` (local leaves) and `set_self` (parent collection).
 # Factored out of `build_mini_node` so the closure environment cleanly
 # binds `children` (the named list of child callables) to `fn_children`
-# — this matches `make_store`'s shape so [validate_write()] and
+# -- this matches `make_store`'s shape so [validate_write()] and
 # `$.reactiveStore` work uniformly across both store kinds.
 #
-# Writes are shape-strict and replace-semantic — the same contract as
+# Writes are shape-strict and replace-semantic -- the same contract as
 # `reactiveStore` branches. Both classes carry the same `reactiveStore`
 # class, so a component receiving "a store-like thing" sees one write
 # contract regardless of whether it's a real store or a per-item
 # projection. Shape transitions are reshaping operations on the *parent
-# collection*, not on the projection — callers express them by writing
+# collection*, not on the projection -- callers express them by writing
 # the new collection through `items` (or, for Match, the leading
 # callable). The outer reconciler observes the parent change and
 # rebuilds this entry with a fresh mini-store of the new shape.
@@ -228,7 +228,7 @@ make_mini_branch_fn <- function(children, keys, path, set_self, set_internal) {
 
 #' Scalar slot accessor for `Each` (positional and keyed)
 #'
-#' Builds the scalar-item analogue of [make_mini_store()] — a callable
+#' Builds the scalar-item analogue of [make_mini_store()] -- a callable
 #' (`reactiveProxy`) over a single value held in the parent collection.
 #' Reads route through an internal `reactiveVal` that is kept in sync with
 #' `get_value()` by a propagating observer; writes route through
@@ -272,7 +272,7 @@ make_slot_accessor <- function(get_value, set_value, scope) {
 # Decide between mini-store projection (records) and bare-callable
 # pass-through (scalars). Same shape as `is_branch` in spirit (fully
 # named bare list with at least one element) but with permissive
-# semantics — partial-naming returns FALSE rather than erroring.
+# semantics -- partial-naming returns FALSE rather than erroring.
 # `is_branch` errors on construction-time misuse of `reactiveStore`;
 # `is_record` is a runtime inspection on item values where erroring
 # would mean crashing a user's app over an accidentally malformed item.
@@ -286,13 +286,13 @@ is_record <- function(value) {
 
 # Disallow mixing records and scalars in one `Each` snapshot. Per-entry
 # shape is decided from each item's own value, so the reconciler
-# *could* mount records and scalars side by side — but a list like
+# *could* mount records and scalars side by side -- but a list like
 # `c(records..., "footer-string")` is almost always a data-modeling
 # slip (a scalar where a `list(...)` was intended). Allowing it would
 # silently hand the body function an `item` that is sometimes a
 # mini-store and sometimes a bare callable; bindings written against
 # one shape would break the other. Heterogeneous *records* (different
-# leaf trees) remain supported — that's the variant pattern, handled
+# leaf trees) remain supported -- that's the variant pattern, handled
 # by `Match` inside the body. Errors with a wrap-in-record hint.
 validate_each_kinds <- function(item_list) {
   if (length(item_list) == 0L) return(invisible())
@@ -301,7 +301,7 @@ validate_each_kinds <- function(item_list) {
     stop(
       "Each() items must be either all records (fully named lists) ",
       "or all scalars/atomics. Mixed-shape lists are usually a ",
-      "data-modeling mistake — wrap scalars in a record like ",
+      "data-modeling mistake -- wrap scalars in a record like ",
       "`list(value = ...)` to mix.",
       call. = FALSE
     )
@@ -315,10 +315,10 @@ validate_each_kinds <- function(item_list) {
 # Returns a nested-list of NULL leaves under the same key tree the
 # mini-store would build, or NULL for a leaf value.
 #
-# Comparison is by `identical()` — two items have the same signature iff
+# Comparison is by `identical()` -- two items have the same signature iff
 # the mini-store they'd build has the same set of leaves at the same
 # paths. Scalars all share the NULL signature; only structural changes
-# (key added/removed at any depth, scalar↔record transition, list-shape
+# (key added/removed at any depth, scalar<->record transition, list-shape
 # field becoming a record or vice versa) flip the signature.
 shape_signature <- function(value) {
   if (inherits(value, "AsIs")) return(NULL)

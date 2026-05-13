@@ -19,7 +19,7 @@ A \code{reactiveProxy} that reads from the internal leaf and writes
 through \code{set_value}.
 }
 \description{
-Builds the scalar-item analogue of \code{\link[=make_mini_store]{make_mini_store()}} — a callable
+Builds the scalar-item analogue of \code{\link[=make_mini_store]{make_mini_store()}} -- a callable
 (\code{reactiveProxy}) over a single value held in the parent collection.
 Reads route through an internal \code{reactiveVal} that is kept in sync with
 \code{get_value()} by a propagating observer; writes route through

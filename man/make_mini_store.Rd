@@ -20,7 +20,7 @@ created against \code{scope$session} and registered for cleanup so
 }
 \value{
 A callable with class \code{c("reactiveStore", "reactive", "function")},
-shaped like a \code{reactiveStore} branch — \code{mini()} reads the record,
+shaped like a \code{reactiveStore} branch -- \code{mini()} reads the record,
 \code{mini(record)} writes it, \code{mini$field()} reads a leaf or sub-branch,
 and \code{mini$field(v)} writes through the parent.
 }
@@ -28,26 +28,26 @@ and \code{mini$field(v)} writes through the parent.
 Builds a \code{reactiveStore}-shaped callable tree that projects a single
 record out of a parent collection. Reads route through \code{get_record()};
 writes (whole-record or per-field synthetic setters) route through
-\code{set_record()}. The mini-store never owns the record's state — the
+\code{set_record()}. The mini-store never owns the record's state -- the
 parent collection is the single source of truth.
 }
 \details{
 Used by \code{Each} (record items) and \code{Match} (record bound value) to
 project fine-grained leaf reactivity out of a coarse-grained parent.
 
-Recursive — nested named lists in the initial record become sub-mini-stores
+Recursive -- nested named lists in the initial record become sub-mini-stores
 (so \code{mini$user$name(v)} writes through the same chain as
 \verb{mini$user(<full-user>)} would).
 Each level threads a sub-\code{get}/\code{set} pair down the tree; writes at any
 depth fan out through the chain of synthetic setters until they reach
 the user-supplied \code{set_record}. Shape uses the same shared
 branch-vs-leaf rules as \code{\link[=reactiveStore]{reactiveStore()}} (\code{is_branch}, \code{is_bare_list},
-\code{strip_asis} are reused), and the same recursive \code{\link[=validate_write]{validate_write()}}
+\code{strip_asis} are reused), and the same recursive \code{validate_write()}
 enforces "no unknown keys, no missing keys" at every level on
 whole-record writes.
 
 \strong{Shape is strict.} Writes are validated against the keys captured
-at construction — same contract as a \code{\link[=reactiveStore]{reactiveStore()}} branch.
+at construction -- same contract as a \code{\link[=reactiveStore]{reactiveStore()}} branch.
 Callers that need to change a slot's shape reshape the \emph{parent
 collection} directly (e.g. for \code{Each(items, ...)}, write the new
 \code{items()} with the slot already replaced); the outer reconciler
@@ -57,7 +57,7 @@ fresh leaf tree of the new shape on the same flush.
 \strong{Writes replace, like \code{\link[=reactiveStore]{reactiveStore()}}.} A branch write must
 include every locked key; missing keys are an error. The complete
 record is what reaches \code{set_record}. Per-field writes
-(\code{mini$field(v)}) remain the dedicated single-slot path — use them
+(\code{mini$field(v)}) remain the dedicated single-slot path -- use them
 when you want to update one field without naming the rest. Dropping
 a field is a parent-level operation: write the reshaped collection
 through the source callable (\code{items(...)}) and the outer reconciler
@@ -68,7 +68,7 @@ parent by a single root-level propagating observer. The observer
 walks the tree top-down via each branch's internal \code{set_internal},
 which recurses to children's \code{set_internal}; only at leaves does an
 actual \code{reactiveVal} write occur, gated by \code{identical(old, new)}.
-This is what delivers the "only changed fields fire" promise — the
+This is what delivers the "only changed fields fire" promise -- the
 diff happens inside the projection rather than at the call site, so
 callers can't get it wrong.
 }
