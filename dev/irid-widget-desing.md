@@ -97,14 +97,16 @@ on this.
 
 ### Layer 2: R primitive — `IridWidget()`
 
-A constructor that creates a widget node — the R-side counterpart of a JS
-library binding. `process_tags` and `mount` handle it as a first-class irid
-construct, just like `Each`, `When`, and `Match`.
+A low-level constructor for **package authors**. End-users never call
+`IridWidget()` directly — they use higher-level component functions like
+`CodeMirror()`, `LeafletMap()`, or `Counter()` that wrap `IridWidget()`
+internally. `process_tags` and `mount` handle the widget node as a
+first-class irid construct, just like `Each`, `When`, and `Match`.
 
 ```r
 IridWidget(
   dep,                  # htmlDependency for the widget's JS/CSS
-  container,            # function(id) that returns the HTML container tag
+  container,            # shiny.tag — the DOM element the library attaches to
 
   # Reactive data channels (R → client) -------------------
   # Named arguments become data channels. Each is observed
@@ -128,15 +130,17 @@ IridWidget(
 
 **What `process_tags` does with a widget node:**
 
-1. **Assigns an ID** using the shared counter (or reuses a user-provided `id`
-   from the container).
-2. **Calls `container(id)`** to produce the static HTML element. The container
-   MUST include `id` in its attributes — `process_tags` ensures this.
-3. **Separates bindings from event handlers**: named args that are functions
+1. **Assigns an ID** using the shared counter.
+2. **Injects the ID** into the container tag: `container$attribs$id <- id`.
+   The container is a static `shiny.tag` — the ID is managed entirely by
+   `process_tags`, never by the package author.
+3. **Adds the `irid-widget` class** to the container so JS code can discover
+   widget elements by class: `container$attribs$class <- paste(class, "irid-widget")`.
+4. **Separates bindings from event handlers**: named args that are functions
    become reactive data channels; `on*` args become event entries (same as
    regular tags).
-4. **Attaches the dependency** via `htmltools::attachDependencies`.
-5. **Records a widget entry** in the result, containing:
+5. **Attaches the dependency** via `htmltools::attachDependencies`.
+6. **Records a widget entry** in the result, containing:
    - `id` — the element ID
    - `config` — static config merged with initial binding values
    - `channels` — named list of reactive getter functions (observed)
@@ -305,7 +309,7 @@ counter_dep <- function() {
 Counter <- function(initial = 0, onClick = NULL) {
   IridWidget(
     dep = counter_dep(),
-    container = \(id) tags$span(id = id, class = "irid-widget counter"),
+    container = tags$span(class = "counter"),
     .config = list(initial = initial),
     onClick = onClick
   )
@@ -349,9 +353,8 @@ CodeMirror <- function(
 ) {
   IridWidget(
     dep = codemirror_dep(),
-    container = \(id) tags$div(
-      id = id,
-      class = "irid-widget codemirror",
+    container = tags$div(
+      class = "codemirror",
       style = "height: 400px; border: 1px solid #ccc;"
     ),
     content = content,                     # reactive data channel
@@ -430,9 +433,8 @@ LeafletMap <- function(
 ) {
   IridWidget(
     dep = leaflet_dep(),
-    container = \(id) tags$div(
-      id = id,
-      class = "irid-widget leaflet-map",
+    container = tags$div(
+      class = "leaflet-map",
       style = "height: 500px;"
     ),
     center = center,        # reactive or static
@@ -600,8 +602,12 @@ if (inherits(node, "irid_widget")) {
   result$events <- c(result$events, events)
 
   # Produce the container
-  container <- node$container(id)
-  container$attribs$id <- id
+  container <- node$container                # static shiny.tag
+  container$attribs$id <- id                 # id injected by process_tags
+  container$attribs$class <- paste(          # irid-widget class added for
+    trimws(container$attribs$class %||% ""), # JS-side element discovery
+    "irid-widget"
+  )
   return(htmltools::attachDependencies(container, node$dep))
 }
 ```
@@ -671,8 +677,9 @@ for (wid in widget_ids) {
 #' (client → R), using `irid.sendEvent()`.
 #'
 #' @param dep An `htmlDependency` containing the widget's JS code.
-#' @param container A function `function(id)` that returns the widget's
-#'   HTML container tag. The tag must include the `id` attribute.
+#' @param container A `shiny.tag` — the DOM element the JS library attaches
+#'   to. The ID is injected by `process_tags`; the container does not need
+#'   to include one.
 #' @param ... Named arguments. Functions with `on*` names become event
 #'   handlers. Other functions become reactive data channels (observed
 #'   and pushed to the client on change). Static values are sent once
@@ -688,6 +695,7 @@ for (wid in widget_ids) {
 #' @export
 IridWidget <- function(dep, container, ..., .config = list(),
                        .event = NULL, .widget_name = NULL) {
+  stopifnot(inherits(container, "shiny.tag"))
   args <- list(...)
   structure(
     list(
@@ -772,11 +780,11 @@ node.
    rate limiting, the R handler uses `event_throttle` / `event_debounce`
    via `.event`, same as DOM events.
 
-4. **Container element restrictions.** The container function returns an
-   `htmltools` tag. Most libraries expect a `<div>`, but some need
-   `<textarea>`, `<canvas>`, or `<video>`. The design imposes no
-   restriction — the container function can return any tag. The `id`
-   is injected by `process_tags`.
+4. **Container element restrictions.** The container is a static `shiny.tag`.
+   Most libraries expect a `<div>`, but some need `<textarea>`, `<canvas>`,
+   or `<video>`. The design imposes no restriction — the container can be
+   any tag. The `id` is injected and the `irid-widget` class is added by
+   `process_tags`.
 
 5. **Nested widget content (children).** Can a widget contain reactive
    children (e.g. a Leaflet popup that uses irid bindings)? This would
