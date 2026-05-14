@@ -93,9 +93,9 @@ App <- function() {
     reactiveProxy(
       get = block$type,
       set = function(new_type) {
-        id <- shiny::isolate(block$id())
-        text <- shiny::isolate(block$text())
-        bs <- shiny::isolate(blocks())
+        id <- block$id()
+        text <- block$text()
+        bs <- blocks()
         idx <- which(vapply(bs, function(b) b$id, integer(1L)) == id)
         bs[[idx]] <- block_for_type(id, new_type, text = text)
         blocks(bs)
@@ -174,17 +174,17 @@ App <- function() {
             tags$div(class = "flex-grow-1"),
             tags$button(
               class = "btn btn-sm btn-outline-secondary",
-              onClick = \() move_block(shiny::isolate(block$id()), -1L),
+              onClick = \() move_block(block$id(), -1L),
               "↑"
             ),
             tags$button(
               class = "btn btn-sm btn-outline-secondary",
-              onClick = \() move_block(shiny::isolate(block$id()), +1L),
+              onClick = \() move_block(block$id(), +1L),
               "↓"
             ),
             tags$button(
               class = "btn btn-sm btn-outline-danger",
-              onClick = \() remove_block(shiny::isolate(block$id())),
+              onClick = \() remove_block(block$id()),
               "×"
             )
           ),

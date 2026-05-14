@@ -75,7 +75,7 @@ App <- function() {
           ),
           tags$button(
             class = "btn btn-sm btn-outline-danger",
-            onClick = \() remove_question(shiny::isolate(question$id())),
+            onClick = \() remove_question(question$id()),
             "Delete"
           )
         ),
@@ -118,7 +118,7 @@ App <- function() {
             tags$button(
               class = "btn btn-sm btn-outline-secondary",
               onClick = \() question$options(
-                c(shiny::isolate(question$options()), "")
+                c(question$options(), "")
               ),
               "+ option"
             ),
@@ -126,7 +126,7 @@ App <- function() {
               class = "btn btn-sm btn-outline-secondary",
               disabled = \() length(question$options()) <= 1L,
               onClick = \() {
-                opts <- shiny::isolate(question$options())
+                opts <- question$options()
                 question$options(opts[seq_len(length(opts) - 1L)])
               },
               "− option"

@@ -139,8 +139,8 @@ TodoApp <- function() {
             Each(filtered, \(todo) {
               TodoItem(
                 todo,
-                on_toggle = \() toggle_todo(shiny::isolate(todo$id())),
-                on_remove = \() remove_todo(shiny::isolate(todo$id()))
+                on_toggle = \() toggle_todo(todo$id()),
+                on_remove = \() remove_todo(todo$id())
               )
             })
           ),
