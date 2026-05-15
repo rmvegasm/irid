@@ -31,8 +31,8 @@ irid's reactive event system that:
 
 1. **Completes the event protocol** — gives user JS a programmatic way to
    fire irid events (the missing piece for non-DOM event sources).
-2. **Stays minimal** — one JS primitive, one R constructor, zero new message
-   types that duplicate existing protocol.
+2. **Stays minimal** — one JS primitive, one R constructor, zero new Shiny
+   input types (client→R events reuse the existing `irid_ev_*` convention).
 3. **Aligns with irid's philosophy** — functions, not expressions; fine-grained
    reactivity; composable components.
 4. **Uses `htmlDependency` for bundling** — no special package structure
@@ -74,7 +74,7 @@ irid.sendEvent(elementId, eventName, payload);
 
 ```
 payload ← merge(payload, { id: elementId, nonce: random, __irid_seq: ++seq })
-inputId ← "irid_ev_" + elementId + "_" + eventName
+inputId ← "irid_ev_" + elementId + "_" + eventName.toLowerCase()
 Shiny.setInputValue(inputId, payload, { priority: "event" })
 ```
 
@@ -124,7 +124,7 @@ IridWidget(
   # Static configuration -----------------------------------
   .config = list(...),  # sent once on init, merged with bindings
   .event = ...,         # timing config (same as element-level .event)
-  .theme = NULL         # optional htmlDependency for CSS only
+
 )
 ```
 
@@ -482,7 +482,7 @@ The following changes are needed to implement this design.
 window.irid = window.irid || {};
 
 irid.sendEvent = function(elementId, eventName, payload) {
-  var inputId = 'irid_ev_' + elementId + '_' + eventName;
+  var inputId = 'irid_ev_' + elementId + '_' + eventName.toLowerCase();
   payload = payload || {};
   payload.id = elementId;
   payload.nonce = Math.random();
