@@ -484,6 +484,57 @@ test_that("on destroy, sends irid-widget-destroy for each widget", {
   expect_equal(destroy_msgs[[1]]$message$id, m$result$widgets[[1]]$id)
 })
 
+test_that("irid-events message for widget events carries timing config", {
+  m <- mount_widget(
+    IridWidget(
+      test_dep(), tags$div(),
+      onChange = function(e) NULL,
+      .event = event_throttle(500)
+    )
+  )
+  ev_msgs <- Filter(function(msg) msg$type == "irid-events", m$session$msgs())
+  expect_length(ev_msgs, 1L)
+  ev_list <- ev_msgs[[1]]$message
+  expect_length(ev_list, 1L)
+  expect_equal(ev_list[[1]]$mode, "throttle")
+  expect_equal(ev_list[[1]]$ms, 500)
+  expect_equal(ev_list[[1]]$event, "change")
+  expect_true(ev_list[[1]]$leading)
+  expect_true(ev_list[[1]]$coalesce)
+})
+
+test_that("irid-events message for widget with default timing (no .event)", {
+  # onChange defaults to immediate (non-input event)
+  m <- mount_widget(
+    IridWidget(
+      test_dep(), tags$div(),
+      onChange = function(e) NULL
+    )
+  )
+  ev_msgs <- Filter(function(msg) msg$type == "irid-events", m$session$msgs())
+  expect_length(ev_msgs, 1L)
+  ev_list <- ev_msgs[[1]]$message
+  expect_length(ev_list, 1L)
+  expect_equal(ev_list[[1]]$mode, "immediate")
+  expect_equal(ev_list[[1]]$event, "change")
+})
+
+test_that("irid-events message for widget onInput defaults to debounce 200", {
+  m <- mount_widget(
+    IridWidget(
+      test_dep(), tags$div(),
+      onInput = function(e) NULL
+    )
+  )
+  ev_msgs <- Filter(function(msg) msg$type == "irid-events", m$session$msgs())
+  expect_length(ev_msgs, 1L)
+  ev_list <- ev_msgs[[1]]$message
+  expect_length(ev_list, 1L)
+  expect_equal(ev_list[[1]]$mode, "debounce")
+  expect_equal(ev_list[[1]]$ms, 200)
+  expect_equal(ev_list[[1]]$event, "input")
+})
+
 # ============================================================================
 # Task 3.4: End-to-end counter widget (R-side lifecycle)
 # ============================================================================
@@ -584,14 +635,21 @@ test_that("Counter inside When: initialized on activation, destroyed on deactiva
   expect_length(init_msgs, 1L)
   expect_equal(init_msgs[[1]]$message$channels$count, 10)
 
-  # Deactivate
+  # Deactivate — the When observer destroys the inner mount,
+  # which sends irid-widget-destroy
   shiny::isolate(show_rv(FALSE))
   flushReact()
 
-  destroy_msgs <- Filter(function(msg) msg$type == "irid-widget-destroy", msgs)
-  # Actually, the destroy happens when When deactivates, which sends
-  # irid-widget-destroy through the mount's $destroy(). Check after
-  # reactivating again...
+  msgs_after <- session$msgs()
+  destroy_msgs <- Filter(
+    function(msg) msg$type == "irid-widget-destroy",
+    msgs_after
+  )
+  expect_length(destroy_msgs, 1L)
+  expect_equal(destroy_msgs[[1]]$message$id, init_msgs[[1]]$message$id)
+
+  # Clean up outer mount
+  handle$destroy()
 })
 
 test_that("Counter inside Each: one instance per item", {
@@ -623,4 +681,157 @@ test_that("Counter inside Each: one instance per item", {
 
   # We should see 3 init messages (one per Counter)
   expect_length(init_msgs, 3L)
+})
+
+# ============================================================================
+# Additional coverage: render_tag_html, config merge, multi-destroy,
+# keyed Each, channel isolation
+# ============================================================================
+
+test_that("render_tag_html prepends dependency scripts to tag HTML", {
+  dep <- htmltools::htmlDependency(
+    name = "test-dep",
+    version = "1.0",
+    src = c(href = "https://example.com"),
+    script = "test.js"
+  )
+  tag <- htmltools::attachDependencies(
+    tags$div("hello", id = "test-el"),
+    dep
+  )
+  html <- irid:::render_tag_html(tag)
+
+  expect_match(html, '<script[^>]*test\\.js', perl = TRUE)
+  expect_match(html, 'id="test-el"', fixed = TRUE)
+  expect_match(html, "hello", fixed = TRUE)
+  # Script tag should appear before the div
+  script_pos <- regexpr('<script[^>]*test\\.js', html, perl = TRUE)[[1]]
+  tag_pos <- regexpr('<div', html, fixed = TRUE)[[1]]
+  expect_true(script_pos > 0L && script_pos < tag_pos)
+})
+
+test_that(".config values override same-named static ... args", {
+  result <- irid:::process_tags(
+    IridWidget(
+      test_dep(), tags$div(),
+      mode = "python",
+      .config = list(mode = "javascript")
+    )
+  )
+  w <- result$widgets[[1]]
+  expect_equal(w$config$mode, "javascript")
+})
+
+test_that("destroy sends irid-widget-destroy for all widgets", {
+  rv1 <- shiny::reactiveVal("a")
+  rv2 <- shiny::reactiveVal("b")
+
+  result <- irid:::process_tags(
+    tagList(
+      IridWidget(test_dep("w1"), tags$div(), content = rv1),
+      IridWidget(test_dep("w2"), tags$div(), content = rv2)
+    )
+  )
+  session <- new_fake_session()
+  handle <- shiny::isolate(irid:::irid_mount_processed(result, session))
+  flushReact()
+
+  w1_id <- result$widgets[[1]]$id
+  w2_id <- result$widgets[[2]]$id
+
+  handle$destroy()
+
+  destroy_msgs <- Filter(
+    function(msg) msg$type == "irid-widget-destroy",
+    session$msgs()
+  )
+  expect_length(destroy_msgs, 2L)
+  destroy_ids <- vapply(
+    destroy_msgs,
+    function(m) m$message$id,
+    character(1L)
+  )
+  expect_true(w1_id %in% destroy_ids)
+  expect_true(w2_id %in% destroy_ids)
+})
+
+test_that("channel update targets only its own widget instance", {
+  rv1 <- shiny::reactiveVal("a")
+  rv2 <- shiny::reactiveVal("x")
+
+  result <- irid:::process_tags(
+    tagList(
+      IridWidget(test_dep("w1"), tags$div(), content = rv1),
+      IridWidget(test_dep("w2"), tags$div(), content = rv2)
+    )
+  )
+  session <- new_fake_session()
+  handle <- shiny::isolate(irid:::irid_mount_processed(result, session))
+  flushReact()
+
+  w1_id <- result$widgets[[1]]$id
+  w2_id <- result$widgets[[2]]$id
+
+  # Change only rv1 — channel message should target w1_id
+  shiny::isolate(rv1("changed"))
+  flushReact()
+
+  msgs <- session$msgs()
+  content_msgs <- Filter(
+    function(msg) msg$type == "irid-widget-channel" &&
+      msg$message$channel == "content" &&
+      msg$message$value == "changed",
+    msgs
+  )
+  expect_length(content_msgs, 1L)
+  expect_equal(content_msgs[[1]]$message$id, w1_id)
+
+  # Change only rv2 — channel message should target w2_id
+  shiny::isolate(rv2("changed2"))
+  flushReact()
+
+  msgs2 <- session$msgs()
+  content_msgs2 <- Filter(
+    function(msg) msg$type == "irid-widget-channel" &&
+      msg$message$channel == "content" &&
+      msg$message$value == "changed2",
+    msgs2
+  )
+  expect_length(content_msgs2, 1L)
+  expect_equal(content_msgs2[[1]]$message$id, w2_id)
+})
+
+test_that("Counter inside keyed Each: add, keep, and remove items", {
+  items_rv <- shiny::reactiveVal(list(10, 20, 30))
+  session <- new_fake_session()
+
+  each_node <- Each(
+    items_rv,
+    \(item) Counter(item),
+    by = \(x) as.character(x)
+  )
+
+  result <- irid:::process_tags(each_node)
+  handle <- shiny::isolate(irid:::irid_mount_processed(result, session))
+  flushReact()
+
+  # 3 items → 3 init messages
+  init_msgs <- Filter(
+    function(msg) msg$type == "irid-widget-init",
+    session$msgs()
+  )
+  expect_length(init_msgs, 3L)
+
+  # Reduce to 1 item — 2 should be destroyed
+  shiny::isolate(items_rv(list(30)))
+  flushReact()
+
+  msgs <- session$msgs()
+  destroy_msgs <- Filter(
+    function(msg) msg$type == "irid-widget-destroy",
+    msgs
+  )
+  expect_length(destroy_msgs, 2L)
+
+  handle$destroy()
 })

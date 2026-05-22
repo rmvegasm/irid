@@ -177,3 +177,86 @@ bypassing that pipeline. Every tag rendered to a string for `irid-swap` or
 `irid-mutate` must have its dependencies manually rendered via
 `renderDependencies()`. The `render_tag_html()` helper in `mount.R` exists
 for this reason.
+
+---
+
+## Session 2 — Test audit and widget event timing fix
+
+**Date:** 22 May 2026
+
+### Test suite audit
+
+Reviewed all 205 existing widget tests across four files. Found three tests
+that passed but didn't actually test what they claimed:
+
+- **`test-widget-mount.R`: When-deactivation destroy** — captured `msgs`
+  before deactivation, so the destroy filter was checking stale data.
+  The assertion was commented out, so the test passed vacuously.
+
+- **`test-widget-example.R`: codemirror.js syntax check** — all four path
+  candidates were wrong (`system.file()` returned `""` because
+  `examples/` lives at repo root, not `inst/examples/`). The test silently
+  skipped via `skip()`.
+
+- **`test-widget-example.R`: CodeMirror When destroy** — called
+  `handle$destroy()` manually after deactivation, testing the manual
+  teardown path instead of the automatic When-deactivation destroy.
+
+Added 12 new tests covering gaps:
+
+- `render_tag_html()` dependency script rendering
+- `.config` vs static `...` arg merge precedence
+- Multi-widget destroy sends all IDs
+- Channel message ID targeting (isolation between instances)
+- Widget inside keyed `Each` (add/keep/remove lifecycle)
+- Static mode value goes to `config`, not `channels` (covers Bug 5 root cause)
+- `irid-events` message structure verification for widget events
+- Managed-state dispatch contract (R mirror of JS `sendEvent` routing)
+- `sendEvent` with throttle/debounce config reaches R handler
+
+Final tally: **256 tests, 0 failures.**
+
+### Widget event timing config fix
+
+**Problem:** Widget JS calls `irid.sendEvent()` directly, which called
+`sendPayload()` directly — completely bypassing the throttle/debounce/immediate
+managed state set up by the `irid-events` message. The `.event` timing config
+on `IridWidget` was dead code for widget events.
+
+**Fix:** Extracted the first-send timing logic from the DOM listener closures
+into a `s.submit(payload)` method on each managed state object (throttle,
+debounce, immediate-with-coalesce). Then:
+
+- DOM listeners in `setupThrottle`/`setupDebounce`/`setupImmediate` now call
+  `s.submit(buildPayload(e, el, msg.id))` — a one-liner instead of inline
+  timing logic.
+- `irid.sendEvent()` checks `managed[inputId]` and routes through
+  `s.submit(payload)` when managed state exists; falls back to direct
+  `sendPayload` when no managed state (immediate without coalesce, or events
+  on elements with no `irid-events` setup).
+
+Stored timing parameters (`inputId`, `ms`, `leading`, `coalesce`, `mode`) on
+the state object itself (previously captured via closure). No new timing logic
+— the same code, just repositioned to be callable from both paths.
+
+**Files changed:** `inst/js/irid.js` (4 functions refactored),
+`tests/testthat/test-widget-client.R` (+5 tests, dispatch contract mirror),
+`tests/testthat/test-widget-mount.R` (+3 tests, irid-events message shape),
+`tests/testthat/test-sendEvent.R` (+2 tests, integration).
+
+### Impact on client-event-queue-design.md
+
+The [client event queue design](client-event-queue-design.md) proposes a
+per-element slot queue to enforce ordering across events on the same element
+(e.g. `onInput` debounce vs `onKeyDown` immediate). This session's change is
+orthogonal and preparatory:
+
+- **Before this change:** `irid.sendEvent` bypassed all client-side event
+  machinery — it would also have bypassed the slot queue.
+- **After this change:** `irid.sendEvent` routes through the same `managed`
+  state and `submit` pipeline as DOM events. When the slot queue is
+  implemented, `irid.sendEvent` will naturally participate in per-element
+  ordering because it feeds through the same entry points.
+
+Concretely, `s.submit(payload)` is where slot-claiming logic would be added
+in a future implementation of the queue design.

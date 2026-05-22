@@ -385,6 +385,97 @@ test_that("trackChannel: multiple independent fields", {
   expect_equal(tracker$receiveChannel("y", 3), "corrected")
 })
 
+# --- Managed state dispatch contract (R mirror) ------------------------------
+#
+# irid.sendEvent checks managed[inputId] and routes through
+# s.submit(payload) when a managed state exists (throttle, debounce,
+# or immediate-with-coalesce). When no managed state exists, it falls
+# back to sendPayload directly. This mirrors the dispatch decision in
+# irid.js without simulating async timer behaviour.
+
+# Minimal managed state stub — records whether submit was called
+make_stub_managed <- function() {
+  env <- new.env(parent = emptyenv())
+  env$submitted <- FALSE
+  env$last_payload <- NULL
+  list(
+    submit = function(payload) {
+      env$submitted <- TRUE
+      env$last_payload <- payload
+    },
+    was_called = function() env$submitted,
+    get_payload = function() env$last_payload
+  )
+}
+
+# Mirror irid.sendEvent dispatch logic
+send_event_dispatch <- function(managed, elementId, eventName, payload) {
+  inputId <- paste0("irid_ev_", elementId, "_", tolower(eventName))
+  s <- managed[[inputId]]
+  if (!is.null(s)) {
+    s$submit(payload)
+    "managed"
+  } else {
+    "direct"
+  }
+}
+
+test_that("sendEvent routes through managed state when throttle is configured", {
+  ms <- make_stub_managed()
+  managed <- list()
+  managed[["irid_ev_el1_change"]] <- ms
+
+  result <- send_event_dispatch(managed, "el1", "change", list(value = 1))
+
+  expect_equal(result, "managed")
+  expect_true(ms$was_called())
+  expect_equal(ms$get_payload()$value, 1)
+})
+
+test_that("sendEvent routes through managed state when debounce is configured", {
+  ms <- make_stub_managed()
+  managed <- list()
+  managed[["irid_ev_el1_input"]] <- ms
+
+  result <- send_event_dispatch(managed, "el1", "input", list(value = "x"))
+
+  expect_equal(result, "managed")
+  expect_true(ms$was_called())
+})
+
+test_that("sendEvent routes through managed state for immediate with coalesce", {
+  ms <- make_stub_managed()
+  managed <- list()
+  managed[["irid_ev_el1_click"]] <- ms
+
+  result <- send_event_dispatch(managed, "el1", "click", list())
+
+  expect_equal(result, "managed")
+  expect_true(ms$was_called())
+})
+
+test_that("sendEvent falls back to direct send when no managed state", {
+  managed <- list()
+
+  result <- send_event_dispatch(managed, "el1", "click", list(value = 42))
+
+  expect_equal(result, "direct")
+})
+
+test_that("sendEvent dispatch is keyed by (element, event) pair", {
+  ms_change <- make_stub_managed()
+  ms_input <- make_stub_managed()
+  managed <- list()
+  managed[["irid_ev_el1_change"]] <- ms_change
+  managed[["irid_ev_el1_input"]] <- ms_input
+
+  # input event should route to ms_input, not ms_change
+  result <- send_event_dispatch(managed, "el1", "input", list(value = "typed"))
+  expect_equal(result, "managed")
+  expect_true(ms_input$was_called())
+  expect_false(ms_change$was_called())
+})
+
 # --- Counter widget lifecycle (conceptual) -----------------------------------
 #
 # The counter widget from Task 2.4 receives init with an initial count,

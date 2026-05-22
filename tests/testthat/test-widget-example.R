@@ -250,32 +250,38 @@ test_that("CodeMirror inside When: init on activation, destroy on deactivation",
   flushReact()
 
   # On activation, init message sent
-  init_msgs <- Filter(function(msg) msg$type == "irid-widget-init", session$msgs())
+  msgs <- session$msgs()
+  init_msgs <- Filter(function(msg) msg$type == "irid-widget-init", msgs)
   expect_length(init_msgs, 1L)
   expect_equal(init_msgs[[1]]$message$channels$content, "hello")
 
-  # Deactivate — destroy should fire
+  # Deactivate — the When observer destroys the inner mount,
+  # which sends irid-widget-destroy. Assert before manual cleanup.
   shiny::isolate(show_rv(FALSE))
   flushReact()
-  handle$destroy()
 
+  msgs_after <- session$msgs()
   destroy_msgs <- Filter(
     function(msg) msg$type == "irid-widget-destroy",
-    session$msgs()
+    msgs_after
   )
-  expect_true(length(destroy_msgs) >= 1L)
+  expect_length(destroy_msgs, 1L)
+  expect_equal(destroy_msgs[[1]]$message$id, init_msgs[[1]]$message$id)
+
+  # Clean up outer mount
+  handle$destroy()
 })
 
 # ---- CodeMirror JS validation -----------------------------------------------
 
 test_that("codemirror.js is syntactically valid JavaScript", {
-  js_path <- "../../examples/codemirror/codemirror.js"
-  # Try multiple resolutions
+  # Resolve the codemirror.js path from tests/testthat/.
+  # The file lives at repo-root examples/, not inst/examples/,
+  # so system.file() returns "".  We try several relative paths.
   candidates <- c(
+    "../../examples/codemirror/codemirror.js",
     "../examples/codemirror/codemirror.js",
-    "examples/codemirror/codemirror.js",
-    "./examples/codemirror/codemirror.js",
-    system.file("examples/codemirror/codemirror.js", package = "irid")
+    "examples/codemirror/codemirror.js"
   )
   found <- NULL
   for (candidate in candidates) {
@@ -318,4 +324,52 @@ test_that("two CodeMirror instances get separate IDs and event targets", {
   expect_length(inits, 2L)
   expect_equal(inits[[1]]$message$channels$content, "a")
   expect_equal(inits[[2]]$message$channels$content, "b")
+})
+
+test_that("static mode value goes to config, not channels", {
+  code_rv <- shiny::reactiveVal("hello")
+  result <- irid:::process_tags(
+    CodeMirrorTest(
+      content = code_rv,
+      mode = "python"   # static, not reactive
+    )
+  )
+  w <- result$widgets[[1]]
+  # content is reactive → channel
+  expect_identical(w$channels$content, code_rv)
+  # mode is static → config, not channel
+  expect_equal(w$config$mode, "python")
+  expect_null(w$channels$mode)
+})
+
+test_that("channel update for two CodeMirror instances targets correct ID", {
+  rv1 <- shiny::reactiveVal("a")
+  rv2 <- shiny::reactiveVal("x")
+
+  result <- irid:::process_tags(
+    tagList(
+      CodeMirrorTest(content = rv1),
+      CodeMirrorTest(content = rv2)
+    )
+  )
+  session <- new_fake_session()
+  handle <- shiny::isolate(irid:::irid_mount_processed(result, session))
+  flushReact()
+
+  w1_id <- result$widgets[[1]]$id
+  w2_id <- result$widgets[[2]]$id
+
+  # Change only first editor's content
+  shiny::isolate(rv1("changed"))
+  flushReact()
+
+  msgs <- session$msgs()
+  content_msgs <- Filter(
+    function(msg) msg$type == "irid-widget-channel" &&
+      msg$message$channel == "content" &&
+      msg$message$value == "changed",
+    msgs
+  )
+  expect_length(content_msgs, 1L)
+  expect_equal(content_msgs[[1]]$message$id, w1_id)
 })

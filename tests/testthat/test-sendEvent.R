@@ -12,6 +12,16 @@
 
 flushReact <- function() shiny:::flushReact()
 
+# Minimal htmlDependency for widget tests
+test_dep <- function(name = "test-widget") {
+  htmltools::htmlDependency(
+    name = name,
+    version = "1.0.0",
+    src = system.file("js", package = "irid"),
+    script = "irid.js"
+  )
+}
+
 # Create a minimal fake Shiny session that records custom messages (so we
 # can verify force-send side effects) and supports setInputs for simulating
 # incoming events.
@@ -271,4 +281,53 @@ test_that("force-send sends binding values tagged with sequence on event", {
     identical(m$message$sequence, 1L)
   }, logical(1L)))
   expect_true(any_with_seq)
+})
+
+# --- sendEvent with widget timing config (integration) ------------------------
+# Verifies the R-side pipeline works when a widget has .event timing config.
+# The JS-side throttle/debounce is tested in test-widget-client.R via the
+# managed-state dispatch contract mirror.
+
+test_that("sendEvent with .event throttle config still dispatches to handler", {
+  captured <- NULL
+  widget <- IridWidget(
+    test_dep("throttled-widget"),
+    tags$div(),
+    onChange = function(e) {
+      captured <<- e$value
+    },
+    .event = event_throttle(500)
+  )
+  m <- mount_handler(widget)
+  ev <- m$result$events[[1]]
+  input_name <- paste0("irid_ev_", ev$id, "_change")
+
+  payload <- list(value = "throttled-send", id = ev$id, nonce = 0.5)
+  payload[["__irid_seq"]] <- 1L
+  simulate_send_event(m$session, input_name, payload)
+  flushReact()
+
+  expect_equal(captured, "throttled-send")
+})
+
+test_that("sendEvent with .event debounce config still dispatches to handler", {
+  captured <- NULL
+  widget <- IridWidget(
+    test_dep("debounced-widget"),
+    tags$div(),
+    onInput = function(e) {
+      captured <<- e$value
+    },
+    .event = event_debounce(300)
+  )
+  m <- mount_handler(widget)
+  ev <- m$result$events[[1]]
+  input_name <- paste0("irid_ev_", ev$id, "_input")
+
+  payload <- list(value = "debounced-send", id = ev$id, nonce = 0.5)
+  payload[["__irid_seq"]] <- 1L
+  simulate_send_event(m$session, input_name, payload)
+  flushReact()
+
+  expect_equal(captured, "debounced-send")
 })

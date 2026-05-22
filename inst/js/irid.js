@@ -374,6 +374,9 @@
       serverBusy: false,
       coalesce: msg.coalesce,
       leading: msg.leading,
+      mode: 'throttle',
+      inputId: msg.inputId,
+      ms: msg.ms,
       maybeSend: null
     };
 
@@ -385,14 +388,43 @@
       s.payload = null;
       s.timerReady = false;
       s.serverBusy = true;
-      sendPayload(msg.inputId, p);
+      sendPayload(s.inputId, p);
       s.timerRunning = true;
       setTimeout(function() {
         s.timerRunning = false;
         s.timerReady = true;
         s.maybeSend();
-      }, msg.ms);
+      }, s.ms);
       if (s.coalesce) ensureIdleListener();
+    };
+
+    s.submit = function(payload) {
+      s.payload = payload;
+      if (!s.timerRunning) {
+        if (s.leading && !(s.coalesce && s.serverBusy)) {
+          // Leading edge: send immediately, start cooldown timer
+          var p = s.payload;
+          s.payload = null;
+          s.serverBusy = true;
+          sendPayload(s.inputId, p);
+          s.timerRunning = true;
+          setTimeout(function() {
+            s.timerRunning = false;
+            s.timerReady = true;
+            s.maybeSend();
+          }, s.ms);
+          if (s.coalesce) ensureIdleListener();
+        } else {
+          // Trailing edge: start timer, send when it fires
+          s.timerRunning = true;
+          setTimeout(function() {
+            s.timerRunning = false;
+            s.timerReady = true;
+            s.maybeSend();
+          }, s.ms);
+        }
+      }
+      // else: timer already running, payload queued for maybeSend
     };
 
     managed[msg.inputId] = s;
@@ -400,31 +432,7 @@
     el.addEventListener(msg.event, function(e) {
       if (shouldSkip(el, msg.event)) return;
       if (msg.preventDefault) e.preventDefault();
-      s.payload = buildPayload(e, el, msg.id);
-      if (!s.timerRunning) {
-        if (s.leading && !(s.coalesce && s.serverBusy)) {
-          // Fire immediately, start cooldown timer
-          var p = s.payload;
-          s.payload = null;
-          s.serverBusy = true;
-          sendPayload(msg.inputId, p);
-          s.timerRunning = true;
-          setTimeout(function() {
-            s.timerRunning = false;
-            s.timerReady = true;
-            s.maybeSend();
-          }, msg.ms);
-          if (s.coalesce) ensureIdleListener();
-        } else {
-          // Start timer, send when it fires
-          s.timerRunning = true;
-          setTimeout(function() {
-            s.timerRunning = false;
-            s.timerReady = true;
-            s.maybeSend();
-          }, msg.ms);
-        }
-      }
+      s.submit(buildPayload(e, el, msg.id));
     });
   }
 
@@ -434,6 +442,9 @@
       timerId: null, timerReady: false,
       serverBusy: false,
       coalesce: msg.coalesce,
+      mode: 'debounce',
+      inputId: msg.inputId,
+      ms: msg.ms,
       maybeSend: null
     };
 
@@ -445,8 +456,19 @@
       s.payload = null;
       s.timerReady = false;
       s.serverBusy = true;
-      sendPayload(msg.inputId, p);
+      sendPayload(s.inputId, p);
       if (s.coalesce) ensureIdleListener();
+    };
+
+    s.submit = function(payload) {
+      s.payload = payload;
+      s.timerReady = false;
+      if (s.timerId !== null) clearTimeout(s.timerId);
+      s.timerId = setTimeout(function() {
+        s.timerId = null;
+        s.timerReady = true;
+        s.maybeSend();
+      }, s.ms);
     };
 
     managed[msg.inputId] = s;
@@ -454,14 +476,7 @@
     el.addEventListener(msg.event, function(e) {
       if (shouldSkip(el, msg.event)) return;
       if (msg.preventDefault) e.preventDefault();
-      s.payload = buildPayload(e, el, msg.id);
-      s.timerReady = false;
-      if (s.timerId !== null) clearTimeout(s.timerId);
-      s.timerId = setTimeout(function() {
-        s.timerId = null;
-        s.timerReady = true;
-        s.maybeSend();
-      }, msg.ms);
+      s.submit(buildPayload(e, el, msg.id));
     });
   }
 
@@ -471,6 +486,8 @@
         payload: null,
         serverBusy: false,
         coalesce: true,
+        mode: 'immediate',
+        inputId: msg.inputId,
         maybeSend: null
       };
 
@@ -480,8 +497,13 @@
         var p = s.payload;
         s.payload = null;
         s.serverBusy = true;
-        sendPayload(msg.inputId, p);
+        sendPayload(s.inputId, p);
         ensureIdleListener();
+      };
+
+      s.submit = function(payload) {
+        s.payload = payload;
+        s.maybeSend();
       };
 
       managed[msg.inputId] = s;
@@ -489,8 +511,7 @@
       el.addEventListener(msg.event, function(e) {
         if (shouldSkip(el, msg.event)) return;
         if (msg.preventDefault) e.preventDefault();
-        s.payload = buildPayload(e, el, msg.id);
-        s.maybeSend();
+        s.submit(buildPayload(e, el, msg.id));
       });
     } else {
       el.addEventListener(msg.event, function(e) {
@@ -554,7 +575,16 @@
     payload.nonce = Math.random();
     if (!sequences[elementId]) sequences[elementId] = 0;
     payload.__irid_seq = ++sequences[elementId];
-    sendPayload(inputId, payload);
+
+    // Route through managed state (throttle/debounce/immediate-coalesce)
+    // if an irid-events message set one up for this (element, event) pair.
+    // This gives widget events the same rate-limiting as DOM events.
+    var s = managed[inputId];
+    if (s) {
+      s.submit(payload);
+    } else {
+      sendPayload(inputId, payload);
+    }
   };
 
   // --- Widget message handlers ---
