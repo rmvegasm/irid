@@ -66,7 +66,6 @@ IridWidget(
   deps     = NULL,
   container = NULL,
   .event   = NULL,
-  .prevent_default = NULL
 )
 ```
 
@@ -201,11 +200,6 @@ IridWidget(
   and the `onClick` is extracted by `process_tags` exactly like a
   regular DOM event. DOM and widget events coexist on the same
   element id, both subject to the same `.event` lookup.
-
-- **`.prevent_default`** unused for widget events (no underlying DOM
-  event to suppress) but accepted for shape-consistency with `tags$*`
-  and the validation path. We could plausibly forbid it — easier to
-  accept-and-ignore for now.
 
 ### Autobind in the wrapper
 
