@@ -185,68 +185,94 @@ IridWidget(
 ### Autobind in the wrapper
 
 A widget's R wrapper expresses round-trip wiring by composing an
-`events` handler that writes through the caller's reactive. The
-canonical shape:
+`events` handler that writes through the caller's reactive. irid
+exports two helpers for this — `can_accept_write()` (the writability
+predicate) and `write_back()` (a handler factory that wraps the
+common pattern). The canonical wrapper:
 
 ```r
 CodeMirror <- function(content, on_change = NULL, ...) {
   IridWidget(
     type   = "codemirror",
     props  = list(content = content),
-    events = list(change = \(e) {
-      if (can_accept_write(content)) content(e$content)
-      if (!is.null(on_change)) on_change(e)
-    }),
+    events = list(change = write_back(content, "content", then = on_change)),
     ...
   )
 }
 ```
 
-Three things to note:
+#### The two helpers
 
-- **`can_accept_write(callable)`** is a public helper exported by
-  irid. It returns `TRUE` for any callable that can accept a write
-  (a `reactiveVal`, store leaf, `reactiveProxy` with a setter, a
-  closure with at least one formal, a primitive), and `FALSE` for
-  read-only callables (`reactive(...)`, `\() expr`, `reactiveProxy`
-  with no setter). Wrappers use it to gate the write-back call so a
-  read-only `content` callable doesn't error.
+- **`can_accept_write(callable)`** — the low-level predicate. Returns
+  `TRUE` for any callable that can accept a write (a `reactiveVal`,
+  store leaf, `reactiveProxy` with a setter, a closure with ≥1
+  formal, a primitive), and `FALSE` for read-only callables
+  (`reactive(...)`, `\() expr`, `reactiveProxy` with no setter), or
+  non-callables. Wrappers use it to gate write attempts so a
+  read-only callable doesn't error.
 
-- **Read-only snap-back happens automatically.** Even when the gate
-  blocks the write, the event listener has *already fired* — that
-  alone is enough. The event observer in `mount.R` runs the
-  force-send-on-no-op loop after every handler: it reads every
-  binding for the source element via `bindings_by_id[[source_id]]`,
-  isolate-evaluates the current canonical value, and emits an
-  `irid-attr widget:<key>` tagged with the sequence. The widget's
-  `update(key, value, sequence)` hook sees a value different from
-  its current state and snaps back. *The wrapper writes nothing
-  extra to get this — registering the listener is sufficient.*
+- **`write_back(callable, field, then = NULL)`** — the sugar. Returns
+  an event handler that:
+  1. Writes `e[[field]]` to `callable` *iff* `can_accept_write(callable)`.
+  2. Calls the optional `then` handler after, arity-dispatched —
+     `then()` for 0-arg, `then(e)` for 1+-arg. Matches the same
+     arity convention as `mount.R` uses elsewhere.
 
-- **Ordering** (write before user handler, in the same flush) is
-  whatever the wrapper writes. The convention modeled here — write
-  first, then user handler — matches DOM autobind, where the
-  explicit `on*` always sees post-write state. Wrappers should
-  follow it and document any deviation.
+  Sketch:
 
-For widgets with several round-trip keys, the wrapper writes one
-handler per event. A small per-wrapper helper can keep this tidy:
+  ```r
+  write_back <- function(callable, field, then = NULL) {
+    force(callable); force(field); force(then)
+    function(e) {
+      if (can_accept_write(callable)) callable(e[[field]])
+      if (!is.null(then)) {
+        if (length(formals(then)) == 0L) then() else then(e)
+      }
+    }
+  }
+  ```
+
+`write_back` is the recommended path. Drop to a hand-written
+`\(e) ...` only when bespoke logic is needed (transform before
+writing, conditional gating, writing through multiple props in one
+handler).
+
+#### Read-only snap-back happens automatically
+
+Even when the writability gate blocks the call, the event listener
+has *already fired* — that alone is enough. The event observer in
+`mount.R` runs the force-send-on-no-op loop after every handler: it
+reads every binding for the source element via
+`bindings_by_id[[source_id]]`, isolate-evaluates the current
+canonical value, and emits an `irid-attr widget:<key>` tagged with
+the sequence. The widget's `update(key, value, sequence)` hook sees
+a value different from its current state and snaps back. *The
+wrapper writes nothing extra to get this — registering the listener
+is sufficient.*
+
+#### Ordering — write first, then user handler
+
+`write_back` calls the writable callable *before* the `then`
+handler. This matches DOM autobind, where the explicit `on*` always
+sees post-write state. Wrappers should follow the same convention;
+deviations should be documented.
+
+#### Multi-event wrappers
+
+For widgets with several round-trip keys, the wrapper becomes a
+table of `write_back` calls:
 
 ```r
-write_through <- function(callable, value, side_effect = NULL) {
-  if (can_accept_write(callable)) callable(value)
-  if (!is.null(side_effect)) side_effect()
-}
-
 events = list(
-  change           = \(e) write_through(content, e$content,
-                                        side_effect = \() on_change(e)),
-  `cursor-changed` = \(e) write_through(cursor,  e$cursor)
+  change           = write_back(content,   "content",   then = on_change),
+  `cursor-changed` = write_back(cursor,    "cursor",    then = on_cursor),
+  scroll           = write_back(scrollTop, "scrollTop"),
+  blur             = on_blur %||% function(e) NULL
 )
 ```
 
-That's enough scaffolding for most widgets; `IridWidget` itself
-stays narrow.
+One line per event. The wrapper stays narrow regardless of how many
+round-trip keys the widget exposes.
 
 ### What `IridWidget` is, structurally
 
@@ -633,10 +659,7 @@ CodeMirror <- function(
   IridWidget(
     type   = "codemirror",
     props  = list(content = content, theme = theme, language = language),
-    events = list(change = \(e) {
-      if (can_accept_write(content)) content(e$content)
-      if (!is.null(on_change)) on_change(e)
-    }),
+    events = list(change = write_back(content, "content", then = on_change)),
     deps   = CodeMirrorDeps(),
     container = tags$div(
       class = "border rounded",
@@ -773,10 +796,10 @@ iridApp(App)
 
 The `CodeMirror(content = doc)` line is the *whole* round-trip wiring
 from the caller's perspective, mirror image of `tags$input(value =
-rv)`. The `\(e) { if (can_accept_write(content)) content(e$content); ... }`
-handler baked into `CodeMirror`'s wrapper is what makes that possible —
-one event entry written once when wrapping the library, then transparent
-for every caller.
+rv)`. The `write_back(content, "content", then = on_change)` baked
+into `CodeMirror`'s wrapper is what makes that possible — one event
+entry written once when wrapping the library, then transparent for
+every caller.
 
 ### What you should observe in the running app
 
@@ -836,7 +859,7 @@ for every caller.
 | Question | Answer |
 |---|---|
 | Constructor signature — reactive in, events out, static config? | Two named-list args: `props` (per-key dispatch on `is.function()` — callable = observed reactive, non-callable = init-only constant), `events` (callbacks out, registered per event name). Plus `container`, `deps`, `.event`. No separate `state` / `config` split; the distinction lives per-key inside `props` and matches irid's "functions, not expressions" rule. |
-| Should widgets autobind? | **No framework-level autobind; per-widget round-trip lives in the wrapper.** The wrapper composes an `events` handler that calls the caller's reactive (`content(e$content)`), gated by the exported `can_accept_write()` helper for read-only safety. Read-only snap-back happens automatically via the existing force-send-on-no-op path — the wrapper just needs the listener registered. Boilerplate is paid once per wrapper, never per call. |
+| Should widgets autobind? | **No framework-level autobind; per-widget round-trip lives in the wrapper.** irid exports two helpers: `can_accept_write()` (writability predicate) and `write_back(callable, field, then = NULL)` (handler factory that combines the write, the writability gate, and an optional chained user handler in one line per event). Read-only snap-back happens automatically via the existing force-send-on-no-op path — `write_back` only needs the listener registered. Boilerplate is paid once per wrapper, never per call. |
 | JS/CSS dep attachment? | `deps = ` arg accepts one `html_dependency` or a list. `process_tags` lifts them off the widget node into `widget_inits` because `htmltools::as.character()` strips them. Mount ships them on the `irid-widget-init` message; client renders via `Shiny.renderDependencies` (dedup by name+version). |
 | How does the JS file declare "I handle widget type X"? | Explicit registry: `irid.defineWidget("type", factory)`. Inits arriving before the registration are queued and drained on registration. Robust under arbitrary script load order. |
 | JS lifecycle contract? | Factory returns `{update, destroy}`. `update(key, value, sequence)` per-key — only fires for keys that were callable on the R side; init-only keys have no update branch. `destroy()` before container detachment. Factory signature `(el, props, send)`. |
@@ -874,6 +897,22 @@ fourth:
     `can_accept_write` in `process_tags.R`, or wrapper around it)
   - documented with the wrapper-author autobind pattern as the canonical
     use case
+
+- **Public helper `write_back(callable, field, then = NULL)`** gets:
+  - writable callable + 1-arg `then` → handler writes through
+    callable, then calls `then(e)`
+  - writable callable + 0-arg `then` → handler writes through
+    callable, then calls `then()`
+  - writable callable + `NULL` `then` → handler only writes
+  - read-only callable → write is silently skipped (gated by
+    `can_accept_write`); `then` still runs; force-send-on-no-op
+    fires the echo so the widget snaps back
+  - non-callable in `callable` slot is a programming error — should
+    error at construction (the wrapper is using the helper
+    incorrectly)
+  - missing `field` in payload at runtime → `callable(NULL)`; the
+    widget author / wrapper author is responsible for emitting the
+    declared field
 
 - **Observer lifecycle** gets:
   - destroying the enclosing mount tears down widget prop observers and event observers
