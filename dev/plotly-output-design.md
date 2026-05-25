@@ -11,6 +11,8 @@ Interactive plots are one of the most common use cases in Shiny apps, and plotly
 
 irid can do better. `PlotlyOutput` should be a first-class output primitive — on par with `PlotOutput` and `TableOutput` — that uses `Plotly.react()` for incremental updates and binds user-controllable state as named reactive arguments, consistent with how every other irid component works.
 
+It is implemented as a thin wrapper on top of [`IridWidget`](irid-widget-design-v2.md), the framework's generic JS-library wrapper mechanism. The widget substrate carries the transport (init message, per-key reactive props, event timing, deps hoisting, lifecycle), and `PlotlyOutput` adds only the plotly-specific logic: serializing the spec, the translation table that maps named args to plotly paths and event sources, and the JS-side `Plotly.react` / `Plotly.relayout` / `Plotly.purge` glue.
+
 ---
 
 ## 2. Goals
@@ -23,6 +25,7 @@ irid can do better. `PlotlyOutput` should be a first-class output primitive — 
 - Works with both `plot_ly()` and `ggplotly()`
 - No JS build step — vanilla JS, consistent with irid core
 - Lives in irid core as a suggested dependency on `{plotly}`
+- Implemented as a wrapper on top of `IridWidget` — no new wire-protocol messages, no PlotlyOutput-specific `process_tags` extraction, no custom mount path
 
 ---
 
@@ -372,117 +375,205 @@ When merging state into the spec, `NULL`-valued named args are simply omitted. W
 
 ## 6. Implementation
 
-### R side
+`PlotlyOutput` carries no custom `process_tags` extraction, no custom wire-message, and no custom client mount path. All of that comes from the `IridWidget` substrate. The wrapper's job is to:
 
-`PlotlyOutput` is a function that returns a tag-like structure recognized by `process_tags`. It accepts:
+- map the user's spec function and named state args into the `props` shape that `IridWidget` understands
+- build the `events` handlers that fan plotly's source events out to the bound state callables, and call user-supplied discrete callbacks
+- ship plotly's `htmlDependency` via `IridWidget(deps = ...)`
+- supply sensible per-event timing defaults via `event_defaults()`
 
-- A function returning a plotly object (the spec)
-- Named reactive args corresponding to entries in the translation table (Section 8)
-- Optional discrete event callbacks (`onClick`, `onHover`, ...)
-- Optional `onRelayout` escape hatch for unrecognized fields
+The JS side is an `irid.defineWidget("plotly", factory)` registration that owns the `Plotly.react()` / `Plotly.relayout()` / `Plotly.purge()` calls and emits raw event payloads via `send()`.
 
-`process_tags` handles `PlotlyOutput` nodes by:
+### R side — wrapper sketch
 
-1. Creating a placeholder `<div>` with a unique ID
-2. Extracting the spec function as a binding
-3. Classifying remaining arguments against the translation table: known named args become state bindings, unknown `on*` args become discrete callbacks, `onRelayout` is the escape hatch
-4. Unknown arguments that don't match anything error at construction time with a helpful message
+```r
+PlotlyOutput <- function(
+  spec,
+  ...,                          # named state args: xaxis_range, dragmode, etc.
+  onClick             = NULL,
+  onHover             = NULL,
+  onUnhover           = NULL,
+  onDoubleclick       = NULL,
+  onDeselect          = NULL,
+  onSelecting         = NULL,
+  onBrushing          = NULL,
+  onLegendClick       = NULL,
+  onLegendDoubleclick = NULL,
+  onClickAnnotation   = NULL,
+  onSunburstClick     = NULL,
+  onRelayout          = NULL,
+  .event              = NULL
+) {
+  state <- list(...)
+  validate_named_args(state)               # error on names not in the translation table
 
-The mount phase creates:
+  # The spec is always a function; wrap it as a callable prop that serializes
+  # to plotly's JSON spec each time its deps change.
+  spec_prop <- function() to_plotly_spec(spec())
 
-1. An `observe()` that serializes the plotly object to JSON, merges non-`NULL` named args into the spec at their table-defined paths, and sends an `irid-plotly-render` message
-2. An `observeEvent()` on each event-source namespaced input that parses the payload and fans writes out to the matching named-arg callables
-3. An `observeEvent()` for each discrete callback that invokes it with the raw payload
-
-### JS side
-
-**`irid-plotly-render`**
-
-```js
-{id: "irid-7", spec: {data: [...], layout: {...}}, bound: ["xaxis_range", "yaxis_range", "selected_points"]}
+  IridWidget(
+    type   = "plotly",
+    props  = c(list(spec = spec_prop), state),
+    events = build_event_handlers(
+      state               = state,
+      onClick             = onClick,
+      onHover             = onHover,
+      onUnhover           = onUnhover,
+      onDoubleclick       = onDoubleclick,
+      onDeselect          = onDeselect,
+      onSelecting         = onSelecting,
+      onBrushing          = onBrushing,
+      onLegendClick       = onLegendClick,
+      onLegendDoubleclick = onLegendDoubleclick,
+      onClickAnnotation   = onClickAnnotation,
+      onSunburstClick     = onSunburstClick,
+      onRelayout          = onRelayout
+    ),
+    deps   = plotly_dependency(),
+    .event = event_defaults(
+      .event,
+      relayout = event_throttle(100, coalesce = TRUE),
+      hover    = event_throttle(100, coalesce = TRUE),
+      selected = event_immediate(),
+      click    = event_immediate()
+    )
+  )
+}
 ```
 
-- If no root exists for `id`, create via `Plotly.react()` and attach event listeners
-- Inject stable `uirevision` if not already present
-- Call `Plotly.react(el, spec.data, spec.layout)`
-- Suppress `plotly_relayout` events until the render settles (auto-fit filtering)
-- Track `bound` fields — the list of named args the R side is binding — so the client knows which fields are authoritative from the server
+What's relying on what in `IridWidget`:
 
-**Snap-back via targeted corrections**
+- **Per-key dispatch on `is.function()`.** The named state args in `...` flow straight into `IridWidget`'s `props`. A `reactiveVal` (or any other callable) becomes a per-key binding; a constant (including `NULL`) becomes an init-only value. The wrapper does no special casing — Widget v2 §1 already handles it.
+- **`spec` is always a callable prop.** Because the user always passes a function, the spec rides as a binding: `isolate(spec_prop())` is read into the init message, and re-evaluations fire `irid-attr widget:spec` updates with the new serialized JSON.
+- **The translation table (§8) lives only on the R side** — it's the wrapper's reference for (a) validating unknown names at construction time and (b) fanning source-event payloads to named-arg callables. The JS side has its own mirror of the table for path lookups; the wire never carries the table itself.
 
-The default `Plotly.react()` + `uirevision` flow *preserves* user-interactive state across renders. This is exactly what we want for data updates, but it **blocks** the snap-back semantics needed for rejecting proxies. If the user zooms, the server rejects the write, and the server re-renders with the old range, `uirevision` preservation will keep plotly showing the user's zoom — the rejection is silently ignored.
+### Event handlers — the relayout fan-out
 
-To restore snap-back, the JS side tracks the last event payload it sent for each bound field. When a new spec arrives, it compares the server's value for each bound field against what the client last sent:
+The plotly_relayout event delivers a dot-notation payload that maps to multiple named-arg callables. The wrapper builds a single `relayout` handler that fans writes across all writable bound callables, then forwards the raw payload to `onRelayout` if the user supplied one. This is the "multi-write handler" pattern Widget v2 §1 explicitly endorses ("drop to a hand-written `\(e) ...` … writing through multiple props in one handler"):
 
-- **Match** → normal render, `Plotly.react()` reconciles, `uirevision` preserves everything else
-- **Mismatch** → targeted `Plotly.relayout(el, {path: value})` call for the field after the `react()`, forcing the correction
+```r
+build_relayout_handler <- function(state, onRelayout) {
+  function(e) {
+    for (entry in TRANSLATION_TABLE_RELAYOUT) {
+      callable <- state[[entry$name]]
+      if (!can_accept_write(callable)) next
+      value <- extract_from_payload(e, entry$path)
+      if (!is.null(value)) callable(value)
+    }
+    if (!is.null(onRelayout)) onRelayout(e)
+  }
+}
+```
 
-This handles both the rejection case ("server didn't accept it") and the transform case ("server accepted a modified version"). Targeted `Plotly.relayout()` bypasses `uirevision` preservation because it's a direct state update, not a reconciliation.
+The handlers for `plotly_selected`, `plotly_restyle`, and similar single-target sources are simpler `write_back`-style one-liners. The discrete-only events (`click`, `hover`, `unhover`, `doubleclick`, …) get a 1-line handler that just calls the user's callback if it's non-`NULL`.
 
-Snap-back only works for fields in the translation table. The `onRelayout` escape hatch has no binding to snap back to.
+The wrapper omits any `events` entry whose user callback is `NULL` *and* whose translation-table fan-out has no writable target. The JS-side `send` would be a silent no-op in that case anyway (Widget v2 §3), but skipping the registration keeps the managed-state table clean.
 
-**Event listeners**
+### Snap-back is automatic
 
-After mount, attach listeners for:
+The original design specced an explicit JS-side "diff server-authoritative vs last-sent" snap-back path. With the widget substrate that's no longer needed — the framework's force-send-on-no-op loop and the widget's idempotent `update` hook combine to deliver the same behavior:
 
-- `plotly_relayout` → parse dot-notation payload, fan out to matching named args, also forward to `onRelayout` callback if provided (filtered for user-initiated only)
-- `plotly_selected` / `plotly_deselect` → write to `selected_points` named arg if bound
-- `plotly_brushed` → write to the selection field (see open questions for brush/select resolution)
-- `plotly_restyle` → write to `trace_visibility` and other restyle-sourced named args
-- `plotly_click`, `plotly_hover`, `plotly_unhover`, `plotly_doubleclick`, `plotly_selecting`, `plotly_brushing`, `plotly_legendclick`, `plotly_legenddoubleclick`, `plotly_clickannotation`, `plotly_sunburstclick` → forward to corresponding discrete callbacks only if bound
+1. User zooms → plotly fires `plotly_relayout` → JS calls `send("relayout", payload)`.
+2. R relayout handler fires. The `reactiveProxy` (or read-only callable) rejects the write — the bound callable's canonical value is *unchanged*.
+3. The framework's force-send-on-no-op loop (Widget v2 §1 "Read-only snap-back happens automatically") reads every binding on the widget's id, `isolate`-evaluates each, and emits `irid-attr widget:xaxis_range` with the **old** canonical value, tagged with the source event's sequence.
+4. The widget's `update("xaxis_range", oldValue, seq)` hook compares against plotly's current state, sees a mismatch, and calls `Plotly.relayout(el, {"xaxis.range": oldValue})` — the snap.
 
-Each listener sends its payload via `Shiny.setInputValue(inputId, value, {priority: "event"})`. Discrete event listeners are only attached if the corresponding callback argument was supplied.
+Targeted `Plotly.relayout()` bypasses `uirevision` preservation because it's a direct state update, not a reconciliation — same observation as the original design, now flowing through the generic substrate. **The wrapper writes nothing extra to get snap-back; registering the listener is sufficient** (the framework guarantee Widget v2 §1 makes for every widget).
 
-**Cleanup**
+### JS side — `irid.defineWidget("plotly", ...)`
 
-When the containing control-flow node tears down, `Plotly.purge(el)` is called to free plotly resources.
+```js
+irid.defineWidget("plotly", function (el, props, send) {
+  var TABLE = PLOTLY_TRANSLATION_TABLE;     // mirror of the R-side table
+  var settling = false;                     // suppress auto-fit relayout echoes
+  var lastSpec = props.spec;
+  var stateCache = {};
+  TABLE.forEach(function (e) { stateCache[e.name] = props[e.name]; });
+
+  function merge(spec, state) {
+    var s = deepCopy(spec);
+    if (s.layout.uirevision == null) s.layout.uirevision = "irid";
+    TABLE.forEach(function (entry) {
+      var v = state[entry.name];
+      if (v != null) setSpecPath(s, entry.path, v);
+    });
+    return s;
+  }
+
+  function render(spec, state) {
+    settling = true;
+    var m = merge(spec, state);
+    return Plotly.react(el, m.data, m.layout).then(function () { settling = false; });
+  }
+
+  render(lastSpec, stateCache);
+
+  el.on("plotly_relayout", function (payload) {
+    if (settling) return;                   // spec-computed (auto-fit), not user
+    send("relayout", payload);
+  });
+  el.on("plotly_selected", function (e) { send("selected", e); });
+  el.on("plotly_deselect", function ()  { send("selected", { points: null }); });
+  el.on("plotly_restyle",  function (e) { send("restyle", e); });
+  el.on("plotly_click",    function (e) { send("click", e); });
+  el.on("plotly_hover",    function (e) { send("hover", e); });
+  // ... one listener per event in the wrapper's events list ...
+
+  return {
+    update: function (key, value, sequence) {
+      if (key === "spec") {
+        lastSpec = value;
+        render(lastSpec, stateCache);
+        return;
+      }
+      var entry = TABLE.find(function (e) { return e.name === key; });
+      if (!entry) return;                   // unknown key — silently dropped
+      stateCache[key] = value;
+
+      if (value == null) {
+        // "defer to spec" — relayout to the spec's value at that path
+        var specValue = getSpecPath(lastSpec, entry.path);
+        Plotly.relayout(el, relayoutPatch(entry.path, specValue));
+      } else {
+        if (sameAsCurrent(el, entry.path, value)) return;     // idempotence
+        Plotly.relayout(el, relayoutPatch(entry.path, value));
+      }
+    },
+    destroy: function () {
+      Plotly.purge(el);
+    }
+  };
+});
+```
+
+Notes on what's load-bearing on the substrate:
+
+- `props` arrives as a single merged object containing both the spec and the named state args — Widget v2 §2 promises this for `irid-widget-init.props`. The widget doesn't need to know which fields were reactive on the R side.
+- `update` fires only for keys that were callable on the R side. Constant state args don't generate update messages; the widget never has to ignore "spurious" same-value updates that the substrate already filtered out.
+- `send` is a silent no-op for events with no R subscriber. The widget can register listeners for every plotly event unconditionally and let the framework gate which round-trip.
+- The widget's `destroy()` runs from the detach walker on `irid-swap` / `irid-mutate` removals (Widget v2 §3) — no custom client teardown code in `PlotlyOutput`.
+
+### Wire protocol
+
+No new messages. The traffic is exactly the widget-substrate messages:
+
+- **`irid-widget-init`** — `{ id, type: "plotly", props: { spec, xaxis_range, ... }, deps: [plotlyDep] }`. Sent after the swap that introduces the placeholder div.
+- **`irid-attr widget:<key>`** — fired by the per-key prop observers on the R side. The widget routes these to its `update(key, value, sequence)` hook.
+- **`irid-events`** with `source: "widget"` — set up at mount for each registered event in the wrapper's `events` list, with the wrapper's `.event` timing applied.
 
 ### Dependencies
 
-- `{plotly}` is a suggested dependency of irid (not imported)
-- `PlotlyOutput()` checks for `{plotly}` availability and errors with a helpful message if missing
-- Plotly.js is loaded via `{plotly}`'s existing `htmlDependency` — no separate CDN or bundling
+`plotly_dependency()` returns the `htmltools::htmlDependency` for plotly.js, sourced from the suggested `{plotly}` package. The wrapper passes it to `IridWidget(deps = ...)`, which lifts it through `widget_inits` and ships it on `irid-widget-init` — the `htmltools::as.character()` strip issue is handled by the substrate, not PlotlyOutput.
+
+The wrapper errors at construction time if `{plotly}` isn't installed, with a message pointing the user at `install.packages("plotly")`.
+
+### Element-level event timing
+
+`event_defaults(.event, ...)` (Widget v2 §1) layers PlotlyOutput's preferred per-event timing (relayout / hover throttled, click immediate) underneath whatever the caller passes via `.event`. A caller scalar wins everywhere; a caller named list fills in per event. Callers who want every event immediate write `.event = event_immediate()`.
 
 ---
 
-## 7. Relationship to irid.react
-
-React component wrapping is a separate concern with a different API shape. React components are defined by their props — the tag pattern is natural, and auto-bind applies the same way it does on raw tags:
-
-```r
-# Registration — turns a React component into an irid tag constructor,
-# declaring which props are state-binding (auto-bind) and which are events
-DataGrid <- react_component("DataGrid",
-  state  = c("selected", "sort", "filter"),
-  events = c("onRowClick")
-)
-
-selected <- reactiveVal(NULL)
-sort     <- reactiveVal(list(col = "name", dir = "asc"))
-
-DataGrid(
-  data       = \() filtered_df(),
-  columns    = col_config(),
-  selected   = selected,                           # auto-bind — read + write
-  sort       = sort,                               # auto-bind — read + write
-  onRowClick = \(event) inspect(event$row)         # discrete event callback
-)
-```
-
-State props accept any irid callable — `reactiveVal`, store leaf, or `reactiveProxy` — and the component reads them for rendering and writes back when the corresponding React event fires. This is the same model as `tags$input(value = x)`, extended across a component boundary. `reactiveProxy` works the same way, including snap-back for rejected writes.
-
-**Why two components share the same mental model but have different implementations:**
-
-- `PlotlyOutput` uses the *output* pattern (function returning a plotly object) because plotly has a rich R-side DSL (`plot_ly()`, `ggplotly()`, pipe chains). Its translation table maps named args to paths inside the generated spec.
-- `irid.react` components use the *tag* pattern because props *are* the interface — there's no intermediate object to compute paths into.
-
-Both expose named reactive args with auto-bind. The rule: if the library has a rich R API that produces a single object, use the output pattern. If the interface is already named-arguments-in / events-out, use the tag pattern.
-
-`irid.react` is a separate package because it brings a runtime dependency (React/ReactDOM) and a JS build step — both contrary to irid's zero-build core.
-
----
-
-## 8. Feature Translation Table
+## 7. Feature Translation Table
 
 The translation table is the list of plotly features `PlotlyOutput` knows how to bind as named args. Each entry specifies:
 
@@ -515,31 +606,32 @@ The table grows additively. Adding a new entry doesn't break any existing code �
 
 ---
 
-## 9. Scope
+## 8. Scope
 
 ### What this covers
 
-- `PlotlyOutput` as a core irid primitive
+- `PlotlyOutput` as a thin `IridWidget` wrapper, shipped from irid core
 - Incremental rendering via `Plotly.react()`
-- Named reactive args for stateful fields, backed by the translation table
-- Discrete event callbacks (`onClick`, `onHover`, `onUnhover`, `onDoubleclick`, `onDeselect`, `onSelecting`, `onBrushing`, `onLegendClick`, `onLegendDoubleclick`, `onClickAnnotation`, `onSunburstClick`)
+- Named reactive args for stateful fields, backed by the translation table — flowing through `IridWidget`'s per-key `props`
+- Discrete event callbacks (`onClick`, `onHover`, `onUnhover`, `onDoubleclick`, `onDeselect`, `onSelecting`, `onBrushing`, `onLegendClick`, `onLegendDoubleclick`, `onClickAnnotation`, `onSunburstClick`) — flowing through `IridWidget`'s `events`
 - `onRelayout` escape hatch for fields outside the table
-- `reactiveProxy` for constrained writes, including snap-back via targeted `Plotly.relayout()`
+- `reactiveProxy` for constrained writes — snap-back falls out of `IridWidget`'s force-send-on-no-op + the widget's `update` hook calling `Plotly.relayout`
 - Bookmark serialization via user-constructed `reactiveStore`s
-- Auto-fit vs user-state distinction
+- Auto-fit vs user-state distinction (client-side `settling` flag inside the widget factory)
 - `uirevision`-aware client-side state handling
 
 ### What this does not cover
 
 - A canonical "plotly state store" constructor — plotly has no canonical state shape, so there is nothing for such a constructor to contain (Section 3)
-- Surgical `Plotly.restyle()` / `Plotly.relayout()` as the primary render path — `Plotly.react()` diffs internally and is fast enough; targeted `relayout` is used only for snap-back corrections
+- Surgical `Plotly.restyle()` / `Plotly.relayout()` as the primary render path — `Plotly.react()` diffs internally and is fast enough; targeted `relayout` is used only for snap-back corrections and per-key state updates
 - A separate `irid.plotly` package — not justified unless `Plotly.react()` proves insufficient for large datasets
-- React component wrapping — separate design (`irid.react`, Section 7)
+- React component wrapping — out of scope; React support is a separate package with its own runtime dependency and build step
 - Generic `htmlwidgets` bridge — most htmlwidgets don't support incremental updates
+- Any extension to the `IridWidget` framework — `PlotlyOutput` is a pure consumer of the substrate as designed in [`irid-widget-design-v2.md`](irid-widget-design-v2.md). See Section 10 for the load-bearing assumptions.
 
 ---
 
-## 10. Open Questions
+## 9. Open Questions
 
 ### Detecting user-initiated relayout
 
@@ -556,11 +648,11 @@ Launch plan: ship with one `selected_points` arg fed from both events, since tha
 
 ### Snap-back reliability with `uirevision`
 
-The targeted `Plotly.relayout()` correction approach (Section 6) assumes the client can reliably diff the server's authoritative value against what it last sent, and that targeted `relayout` calls bypass `uirevision` preservation. Both assumptions need prototype validation. Edge cases:
+The snap-back path (Section 6) is now: framework force-send-on-no-op → `irid-attr widget:<key>` echo → widget `update` hook → targeted `Plotly.relayout()`. The widget-substrate half is well-defined; the unknowns are plotly-internal:
 
-- Rapid user interactions while a correction is in flight
-- Corrections on arrays vs scalars (e.g. `xaxis.range` vs `dragmode`)
-- Correction interactions with plotly's own animation/transition layer
+- Whether targeted `relayout` reliably bypasses `uirevision` preservation for every bound field (arrays like `xaxis.range`, scalars like `dragmode`, nested paths like `scene.camera.eye.x`)
+- Behavior under rapid user interactions while a correction is in flight (the widget's idempotence check — "incoming value equals plotly's current value" — gates redundant relayouts, but ordering with plotly's own transition layer needs prototype validation)
+- Whether the widget can usefully read plotly's "current state at path" for the comparison (likely via `el._fullLayout` introspection or a per-event cache of last-sent payloads)
 
 ### Integration with irid's stale UI indicator
 
@@ -573,3 +665,27 @@ A plot may have a variable number of subplot axes depending on the data. The nam
 ### Growing the table
 
 New fields are added to the translation table as usage patterns clarify which plotly features are common enough to warrant first-class support. The `onRelayout` escape hatch covers everything else in the meantime. Criteria for promotion: (1) multiple users bind the field via the escape hatch, (2) the field has a stable payload shape across plot types, (3) snap-back semantics are well-defined for it.
+
+---
+
+## 10. Substrate dependence — what PlotlyOutput leans on `IridWidget` for
+
+`PlotlyOutput` is fully expressible on top of `IridWidget` as designed in [`irid-widget-design-v2.md`](irid-widget-design-v2.md); no new framework features are required. The notes below catalog the substrate guarantees PlotlyOutput's correctness depends on, so that future changes to `IridWidget` know PlotlyOutput is a downstream consumer of these contracts.
+
+- **Force-send-on-no-op echoes every binding on the widget's id after every event.** PlotlyOutput's snap-back path *requires* this — when a `reactiveProxy` rejects a write, the framework must still emit `irid-attr widget:<key>` carrying the unchanged canonical value, so the widget's `update` hook can snap plotly back. Narrowing the echo (e.g., "only echo bindings the event handler conceptually writes to") would silently break PlotlyOutput's rejection semantics.
+
+- **`update(key, value, sequence)` arity is stable.** PlotlyOutput's idempotence path compares `value` against plotly's current state at the corresponding path; it ignores `sequence`. Widget v2 explicitly says that's the widget author's call. Stable as long as the hook's signature doesn't change.
+
+- **The init message ships a single merged `props` object** containing both the spec and the named state args. The factory destructures `props.spec` and the named keys from one object. If the substrate ever split init into "constant" and "binding-driven" channels, the factory would need to adapt.
+
+- **`send()` is a silent no-op when no R subscriber exists for an event name.** PlotlyOutput's JS registers listeners for every plotly event it knows about and lets the framework gate which ones round-trip. If the substrate ever required pre-declaring every event a widget can emit (e.g. surfacing a hard error for unknown event names), PlotlyOutput would need to switch to conditionally registering plotly listeners based on which `events` the wrapper passed — feasible but tighter.
+
+- **Multi-write handlers are an accepted pattern.** The relayout fan-out writes through several callables in one function — Widget v2 §1 endorses this explicitly. Calling it out here so the pattern doesn't get lint-driven away.
+
+- **`is.function()` dispatch on `props` is per-key.** A `reactiveVal` becomes a binding; a constant (including `NULL`) becomes an init-only static prop. PlotlyOutput's named state args rely on both halves: `xaxis_range = NULL` should not produce an observer; `xaxis_range = rv` should. Removing the per-key dispatch (e.g., requiring all `props` to be either all-callable or all-static) would require the wrapper to do that classification itself.
+
+- **`event_defaults()` resolves caller `.event` > wrapper defaults > framework default.** PlotlyOutput's "relayout throttled, click immediate" defaults rely on the wrapper-default tier being preserved when the caller passes a per-event named-list `.event`. Widget v2 §1 specifies this three-tier resolution.
+
+- **Targeted `Plotly.relayout()` bypasses `uirevision` preservation.** Strictly a plotly-internal property, not a substrate one — but the snap-back design is wholly load-bearing on it. If plotly ever changes this, no widget-level workaround exists; PlotlyOutput would need to retain the original design's "track last-sent per field" intent somewhere (likely client-side in the widget factory).
+
+None of the items above are gaps in `IridWidget` — they are contracts the substrate already meets that PlotlyOutput depends on continuing to meet.
