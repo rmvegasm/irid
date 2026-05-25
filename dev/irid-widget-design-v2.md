@@ -22,7 +22,7 @@ as a single R component constructor that composes inside `When` / `Each` /
    irid a *universal* (prop, write event, event field) triple that
    holds for every DOM element — `value` ↔ `input` ↔ `e.value` — so
    irid hard-codes it at the framework level. JS libraries have no
-   universal triple, so `IridWidget` exposes only `state` (one-way
+   universal triple, so `IridWidget` exposes only `props` (one-way
    in) and `events` (raw callbacks out). The widget's R wrapper is the
    right place to synthesize a round-trip: it knows the library, it
    composes a one-line event handler that writes through the caller's
@@ -61,9 +61,8 @@ as a single R component constructor that composes inside `When` / `Each` /
 ```r
 IridWidget(
   type,           # string — registry key, must match a JS-side defineWidget
-  state    = list(),
+  props    = list(),
   events   = list(),
-  config   = list(),
   deps     = NULL,
   container = NULL,
   .event   = NULL,
@@ -82,20 +81,50 @@ IridWidget(
   library-prefixed kebab form (`"plotly"`, `"cm6-editor"`,
   `"leaflet-map"`).
 
-- **`state`** (named list of callables). Reactive inputs flowing
-  server→client. Each entry must be a callable irid treats as reactive
-  (a `reactiveVal`, `reactive(...)`, store leaf, `reactiveProxy`, or a
-  bare 0-arg function). For each entry `key = fn`, `process_tags` emits:
-  - one binding `{id, attr = "widget:<key>", fn}` — mount opens an
+- **`props`** (named list). Inputs flowing server→client.
+  **Per-key dispatch on `is.function()`**, mirroring how `tags$*`
+  attributes work elsewhere in irid:
+
+  - **Callable** (`reactiveVal`, `reactive(...)`, store leaf,
+    `reactiveProxy`, bare 0-arg closure) → `process_tags` emits a
+    binding `{id, attr = "widget:<key>", fn}`. Mount opens an
     observer that fires `irid-attr` on change; the client routes
-    `widget:*` attrs to the widget's `update` hook.
-  - the key's *initial value* is read via `isolate(fn())` at mount time
-    and sent in the init message, so mount does not subscribe to the
-    widget's state.
-  - Write-back is *not* wired automatically. The widget's R wrapper
-    composes an `events` handler that writes through the caller's
-    reactive — see the *Autobind in the wrapper* section below and
-    the worked example.
+    `widget:*` attrs to the widget's `update(key, value, sequence)`
+    hook. Initial value is read via `isolate(fn())` at mount time
+    and bundled into the init message, so mount itself does not
+    subscribe to the prop.
+  - **Non-callable** (string, number, list, `NULL`, anything else) →
+    bundled into the init message as the prop's value. No observer
+    registered.
+
+  This matches irid's "functions, not expressions" rule: anywhere a
+  value goes in irid, passing a function makes it reactive. Widgets
+  are no exception.
+
+  **Init-only library options.** Some library knobs genuinely can't
+  be live-updated (CodeMirror extensions are committed at
+  `EditorState.create` time; Monaco's `automaticLayout` only takes
+  effect at construction; Plotly's init opts aren't re-read on
+  update). For these:
+
+  - The wrapper's *documentation* tells callers "this is init-only;
+    passing a reactive will only use its initial value."
+  - The widget's JS `update` hook *has no branch* for that key — the
+    update message arrives, the switch on `key` falls through, the
+    update is silently dropped. Same shape as a Shiny module
+    silently no-op'ing on an input it doesn't read.
+
+  This is the cost of the unified `props` arg: a caller can pass a
+  reactive to an init-only key and get silent one-shot behavior. The
+  benefit is symmetry with the rest of irid, full caller discretion
+  over what's reactive in their app, and migration paths (adding live
+  update support to a previously-init-only option doesn't change the
+  wrapper signature).
+
+  Write-back for callable props is *not* wired automatically. The
+  widget's R wrapper composes an `events` handler that writes through
+  the caller's reactive — see *Autobind in the wrapper* below and
+  the worked example.
 
 - **`events`** (named list of handler functions). Event sinks flowing
   client→server. Each entry `name = handler` becomes an event entry in
@@ -118,14 +147,6 @@ IridWidget(
     consistent with DOM event handlers across the rest of irid.
     Single-value events should still emit `{content: value}` rather
     than the bare value, so the handler signature is uniform.
-
-- **`config`** (named list). Static init-time configuration. Sent once
-  with the init message; never observed. Plain R values only — no
-  reactive callables. If the user passes a callable, it is silently
-  `isolate()`-read at mount time (a function value would never reach
-  the client cleanly anyway, since it has no JSON form).
-  Rationale for separating `state` from `config`: it documents intent
-  ("this never changes") and saves an observer per static option.
 
 - **`deps`** (`html_dependency`, list of them, or `NULL`). JS/CSS
   dependencies the widget needs to function. **Required for any widget
@@ -171,7 +192,7 @@ canonical shape:
 CodeMirror <- function(content, on_change = NULL, ...) {
   IridWidget(
     type   = "codemirror",
-    state  = list(content = content),
+    props  = list(content = content),
     events = list(change = \(e) {
       if (can_accept_write(content)) content(e$content)
       if (!is.null(on_change)) on_change(e)
@@ -235,8 +256,8 @@ processed tag tree:
 
 - A clean tag tree (the container, with auto-assigned `id` and the
   `data-irid-widget` attribute, plus any user children)
-- N entries appended to `$bindings` (one per `state` key, attr =
-  `widget:<key>`)
+- N entries appended to `$bindings` (one per *callable* `props` key,
+  attr = `widget:<key>`). Non-callable props produce no binding.
 - M entries appended to `$events`, one per explicit `events` entry,
   marked with `source = "widget"`. (No framework-level autobind path,
   so no `merge_pending_events` collision case to handle for widgets —
@@ -244,9 +265,13 @@ processed tag tree:
   bug.)
 - One entry appended to `$widget_inits` — a new sibling list to
   `$bindings` / `$events` / `$control_flows` / `$shiny_outputs` —
-  carrying `{id, type, config, state_fns, deps}`. `state_fns` is the
-  raw list of callables; mount uses them to isolate-read initial
-  values when constructing the init message.
+  carrying `{id, type, prop_fns, static_props, deps}` where
+  `prop_fns` is the named list of callable prop entries and
+  `static_props` is the named list of non-callable entries. Mount
+  resolves them at init-message construction: `isolate(fn())` for
+  each callable, the literal value for each static. The client sees
+  one unified `props` object — it doesn't need to know which keys
+  were reactive on the R side.
 
 By piggybacking on existing extraction lists for bindings and events,
 the widget gets the existing observer/event plumbing for *free* — the
@@ -258,8 +283,8 @@ The widget container lives inside a control-flow wrapper range; its
 lifetime is the lifetime of that range. Concretely:
 
 - **`When` true→false transition.** The enclosing mount's
-  `destroy()` runs all observers for the widget's state and event
-  entries; the `irid-swap` empties the range. The detached fragment
+  `destroy()` runs all observers for the widget's prop bindings and
+  event entries; the `irid-swap` empties the range. The detached fragment
   is walked client-side for `data-irid-widget` elements; their
   `destroy()` hooks run before the elements are GC'd. *Client-driven
   teardown by design* — no `irid-widget-destroy` message — so the
@@ -388,14 +413,23 @@ mount.R.
 {
   id: "irid-7",
   type: "codemirror",
-  state: { content: "initial code\n", language: "r" },
-  config: { theme: "dracula", lineNumbers: true },
+  props: {
+    content: "initial code\n",   // came from a reactive on R side
+    theme: "dracula",            // came from a constant on R side
+    language: "r",
+    lineNumbers: true
+  },
   deps: [
     { name: "codemirror", version: "6.0.1",
       script: "...", stylesheet: "..." }
   ]
 }
 ```
+
+The client receives one unified `props` object. Whether each key was
+reactive or constant on the R side is invisible at this layer — the
+distinction shows up only in whether subsequent `irid-attr widget:<key>`
+messages arrive for that key.
 
 Sent **after** the swap/mutate that introduces the widget's container
 into the DOM. Two-step ordering — and the deferred-flush ordering of
@@ -411,12 +445,12 @@ Client receipt:
    deps ready".
 2. Once deps ready, look up `defineWidget`'s registry for `type`.
 3. **If type is registered**: look up `document.getElementById(id)`,
-   call the factory `init(el, state, config, send)`, store the
-   returned `{update, destroy}` handle in a per-id widget map.
+   call the factory `init(el, props, send)`, store the returned
+   `{update, destroy}` handle in a per-id widget map.
 4. **If type is not registered** (script still parsing /
-   load order race): queue `{id, state, config, el}` under the type
-   key. `defineWidget(type, factory)` drains the queue for `type`
-   when called.
+   load order race): queue `{id, props, el}` under the type key.
+   `defineWidget(type, factory)` drains the queue for `type` when
+   called.
 
 The init message is **idempotent on the client**: if a widget is
 already mounted at `id`, the message is dropped. This guards against
@@ -442,10 +476,10 @@ by the server (it shouldn't, but defense in depth costs nothing).
 - **Widget events share timing/sequence machinery.** Handled by
   threading widget events through `irid-events` with `source:
   "widget"` and routing pushes through `managed[inputId]`.
-- **`isolate()` at init.** The `state_fns` list is read with
-  `isolate(fn())` in the init-message constructor; mount does not
-  subscribe to widget state when sending init. The per-key observers
-  are what subscribe — they get registered as ordinary bindings.
+- **`isolate()` at init.** Callable props are read with `isolate(fn())`
+  in the init-message constructor; mount does not subscribe to widget
+  state when sending init. The per-key observers are what subscribe —
+  they get registered as ordinary bindings.
 
 ---
 
@@ -463,9 +497,9 @@ window.irid = {
 ```
 
 - **`defineWidget(type, factory)`**: register a widget kind. `factory`
-  is `function (el, state, config, send) -> { update, destroy }`. If
-  the type already has queued inits, the registration drains them in
-  arrival order before returning.
+  is `function (el, props, send) -> { update, destroy }`. If the type
+  already has queued inits, the registration drains them in arrival
+  order before returning.
 - **`sendWidgetEvent(id, event, payload)`**: route an event payload
   through the managed-state pipeline for the `(id, event)` pair.
   `event` is the lowercase event name from the R `events` list. The
@@ -478,17 +512,17 @@ window.irid = {
 ### What the widget author writes
 
 ```js
-irid.defineWidget("codemirror", function (el, state, config, send) {
-  // el: the container DOM element (already in the document)
-  // state: initial state values {content: "..."}; same keys as R `state =`
-  // config: static config from R `config =`
-  // send: send(event, payload) — push events through irid's pipeline
-  //       same DOM event-payload shape constraint (strings/numbers/booleans);
-  //       irid adds id, nonce, __irid_seq
+irid.defineWidget("codemirror", function (el, props, send) {
+  // el:    the container DOM element (already in the document)
+  // props: initial values for every R `props =` key
+  // send:  send(event, payload) — push events through irid's pipeline
+  //        (records of strings/numbers/booleans; irid adds id, nonce,
+  //        __irid_seq)
 
   var editor = createEditor(el, {
-    doc: state.content,
-    theme: config.theme,
+    doc: props.content,
+    theme: props.theme,
+    language: props.language,
     extensions: [/* ... */]
   });
 
@@ -498,11 +532,14 @@ irid.defineWidget("codemirror", function (el, state, config, send) {
 
   return {
     update: function (key, value, sequence) {
+      // Branch only on keys the widget can live-update. Anything not
+      // listed here (e.g. `language`, `extensions`) is silently dropped
+      // — those are init-only per CodeMirror's API.
       if (key === "content") {
         if (value === editor.getValue()) return;       // idempotence
         editor.setValue(value);
-      } else if (key === "language") {
-        editor.setLanguage(value);
+      } else if (key === "theme") {
+        editor.setTheme(value);
       }
     },
     destroy: function () {
@@ -517,11 +554,9 @@ Contract details:
 - **`el`** is owned by the widget for the duration of its lifetime —
   irid will not modify it. The widget may set children, attrs,
   classes freely.
-- **`state`** is a plain object with the initial values for every R
-  `state =` key. The widget is responsible for applying them during
-  init.
-- **`config`** is a plain object. The widget treats it as read-only
-  after init — no updates will arrive.
+- **`props`** is a plain object with the initial values for every R
+  `props =` key, regardless of whether each was reactive or constant
+  on the R side. The widget applies them during init.
 - **`send(event, payload)`** is a closure over `(id, event)`. The
   widget calls it whenever a user action should reach R. `payload` is
   any JSON-serializable object; the R handler receives it with `id`,
@@ -529,11 +564,13 @@ Contract details:
   event name (the R side simply omitted that handler), `send` is a
   silent no-op — the widget can fire events unconditionally.
 - **`update(key, value, sequence)`** runs in response to a single
-  `state` key changing. `sequence` is `undefined` for programmatic
-  updates (no event triggered the change) and a number for echoes from
-  an event that originated on the same widget. *Idempotence is the
-  widget author's responsibility* — most updates round-trip the value
-  the widget just sent.
+  `props` key changing — only fires for keys that were callable on
+  the R side. `sequence` is `undefined` for programmatic updates (no
+  event triggered the change) and a number for echoes from an event
+  that originated on the same widget. *Idempotence is the widget
+  author's responsibility* — most updates round-trip the value the
+  widget just sent. Keys the widget can't or won't live-update should
+  simply have no branch in the switch; the update is dropped.
 - **`destroy()`** runs before the widget's container is detached from
   the DOM. The widget should tear down anything that isn't pure DOM
   inside `el`: window listeners, animation frames, timers, web socket
@@ -575,29 +612,31 @@ CodeMirrorDeps <- function() {
 
 #' CodeMirror editor widget
 #'
-#' @param content    reactive callable for the document text. A writable
+#' @param content   document text. Constant or reactive. A writable
 #'   reactive (`reactiveVal`, store leaf, `reactiveProxy` with a setter,
 #'   ...) gets a round-trip; a read-only callable (`reactive(...)`,
 #'   0-arg closure) renders read-only and snaps the editor back on any
-#'   user edit.
-#' @param on_change  optional side handler `\(e) ...` to run after the
+#'   user edit; a plain string mounts the editor with that initial
+#'   text and never updates.
+#' @param theme     theme name. Constant or reactive — reactive values
+#'   are applied live via the JS `setTheme` API.
+#' @param language  language name. **Init-only** per CodeMirror's API.
+#'   A reactive value is read once at mount; later changes are ignored.
+#' @param on_change optional side handler `\(e) ...` to run after the
 #'   write-back. Useful for logging or cross-field effects.
-#' @param language   static language name (e.g. "r", "javascript").
-#' @param theme      static theme name (e.g. "dracula").
 CodeMirror <- function(
   content,
-  on_change = NULL,
+  theme     = "dracula",
   language  = "r",
-  theme     = "dracula"
+  on_change = NULL
 ) {
   IridWidget(
     type   = "codemirror",
-    state  = list(content = content),
+    props  = list(content = content, theme = theme, language = language),
     events = list(change = \(e) {
       if (can_accept_write(content)) content(e$content)
       if (!is.null(on_change)) on_change(e)
     }),
-    config = list(language = language, theme = theme),
     deps   = CodeMirrorDeps(),
     container = tags$div(
       class = "border rounded",
@@ -608,15 +647,23 @@ CodeMirror <- function(
 }
 ```
 
-The wrapper's *caller* never sees the autobind plumbing:
+The wrapper's *caller* never sees the autobind plumbing, and decides
+per-arg what's reactive:
 
 ```r
-# Minimal round-trip — no handler boilerplate at the call site.
+# Everything static.
+CodeMirror(content = "hello\n")
+
+# Reactive content, static theme/language — minimal round-trip.
 CodeMirror(content = doc)
 
-# Same widget, view-only — `reactive()` makes it read-only; the wrapper's
-# `can_accept_write` gate skips the write, and the force-send-on-no-op
-# path echoes the canonical value back, snapping the editor.
+# Reactive theme too — caller wants the editor to follow the app's
+# dark-mode toggle.
+CodeMirror(content = doc, theme = current_theme)
+
+# Read-only view. The wrapper's `can_accept_write` gate skips the
+# write, the force-send-on-no-op path echoes the canonical value
+# back, snapping the editor.
 CodeMirror(content = reactive(paste0("# Generated\n", source_text())))
 
 # Bring-your-own side handler. The wrapper's `change` handler calls
@@ -625,6 +672,11 @@ CodeMirror(
   content   = doc,
   on_change = \(e) audit_log(now(), e$content)
 )
+
+# Caller passes a reactive to `language` — silently one-shot,
+# because the wrapper's docs flagged it as init-only and the widget's
+# JS update hook has no branch for "language".
+CodeMirror(content = doc, language = current_lang)
 ```
 
 ### JS binding
@@ -641,15 +693,15 @@ import {dracula}    from "thememirror";
 
 var LANGS = { r: r, javascript: javascript };
 
-irid.defineWidget("codemirror", function (el, state, config, send) {
+irid.defineWidget("codemirror", function (el, props, send) {
   var view = new EditorView({
     parent: el,
     state: EditorState.create({
-      doc: state.content,
+      doc: props.content,
       extensions: [
         basicSetup,
-        LANGS[config.language](),
-        config.theme === "dracula" ? dracula : [],
+        LANGS[props.language](),                          // init-only
+        props.theme === "dracula" ? dracula : [],
         EditorView.updateListener.of(function (u) {
           if (u.docChanged) {
             send("change", { content: u.state.doc.toString() });
@@ -661,12 +713,18 @@ irid.defineWidget("codemirror", function (el, state, config, send) {
 
   return {
     update: function (key, value, sequence) {
-      if (key !== "content") return;
-      var current = view.state.doc.toString();
-      if (value === current) return;       // echo of what we just sent
-      view.dispatch({
-        changes: { from: 0, to: current.length, insert: value }
-      });
+      if (key === "content") {
+        var current = view.state.doc.toString();
+        if (value === current) return;     // echo of what we just sent
+        view.dispatch({
+          changes: { from: 0, to: current.length, insert: value }
+        });
+      } else if (key === "theme") {
+        // Live theme swap via a reconfigurable compartment (omitted for brevity)
+        applyTheme(view, value);
+      }
+      // No branch for "language" — init-only per CodeMirror;
+      // updates are silently dropped.
     },
     destroy: function () {
       view.destroy();
@@ -746,7 +804,7 @@ for every caller.
 
 3. **Toggle the switch off.** `editor_open` flips to `FALSE`. The
    `When` observer destroys the inner mount (tearing down the widget's
-   state binding observer and event observer), sends `irid-swap` with
+   prop binding observer and event observer), sends `irid-swap` with
    empty HTML. The client `detachRange` walker finds
    `[data-irid-widget]` inside the detached fragment, calls the
    widget's `destroy()` — the EditorView is torn down — and clears the
@@ -777,15 +835,15 @@ for every caller.
 
 | Question | Answer |
 |---|---|
-| Constructor signature — reactive in, events out, static config? | Three named-list args: `state` (reactive in, observed per-key), `events` (callbacks out, registered per event name), `config` (static, sent once at init). Plus `container`, `deps`, `.event`. |
+| Constructor signature — reactive in, events out, static config? | Two named-list args: `props` (per-key dispatch on `is.function()` — callable = observed reactive, non-callable = init-only constant), `events` (callbacks out, registered per event name). Plus `container`, `deps`, `.event`. No separate `state` / `config` split; the distinction lives per-key inside `props` and matches irid's "functions, not expressions" rule. |
 | Should widgets autobind? | **No framework-level autobind; per-widget round-trip lives in the wrapper.** The wrapper composes an `events` handler that calls the caller's reactive (`content(e$content)`), gated by the exported `can_accept_write()` helper for read-only safety. Read-only snap-back happens automatically via the existing force-send-on-no-op path — the wrapper just needs the listener registered. Boilerplate is paid once per wrapper, never per call. |
 | JS/CSS dep attachment? | `deps = ` arg accepts one `html_dependency` or a list. `process_tags` lifts them off the widget node into `widget_inits` because `htmltools::as.character()` strips them. Mount ships them on the `irid-widget-init` message; client renders via `Shiny.renderDependencies` (dedup by name+version). |
 | How does the JS file declare "I handle widget type X"? | Explicit registry: `irid.defineWidget("type", factory)`. Inits arriving before the registration are queued and drained on registration. Robust under arbitrary script load order. |
-| JS lifecycle contract? | Factory returns `{update, destroy}`. `update(key, value, sequence)` per-key. `destroy()` before container detachment. `init` signature `(el, state, config, send)`. |
-| `When`/`Each`/`Match` teardown ordering? | Server-side: `irid_mount_processed`'s `destroy()` tears down state/event observers as part of the enclosing mount's `observers` list. Client-side: `irid-swap` / `irid-mutate` detach walkers find `data-irid-widget` elements in the detached fragment and call their `destroy()` hooks before GC. No `irid-widget-destroy` message — purely client-driven. |
+| JS lifecycle contract? | Factory returns `{update, destroy}`. `update(key, value, sequence)` per-key — only fires for keys that were callable on the R side; init-only keys have no update branch. `destroy()` before container detachment. Factory signature `(el, props, send)`. |
+| `When`/`Each`/`Match` teardown ordering? | Server-side: `irid_mount_processed`'s `destroy()` tears down prop and event observers as part of the enclosing mount's `observers` list. Client-side: `irid-swap` / `irid-mutate` detach walkers find `data-irid-widget` elements in the detached fragment and call their `destroy()` hooks before GC. No `irid-widget-destroy` message — purely client-driven. |
 | Container element ownership? | User-supplied via `container = tags$div(...)`. irid injects `id` and `data-irid-widget = type`. User can set classes, styles, even children. Default `tags$div()`. |
 | Widget identity across re-renders? | Tied to container's DOM element identity. **Survives** `Each` keyed reorders (insertBefore preserves identity). **Does not survive** `When`/`Match` branch flips or `Each` shape-change rebuilds — those rebuild the widget fresh. Same semantics as `<input>` focus/scroll/selection state. |
-| Initial state read — reactive dep? | `state_fns` are read via `isolate(fn())` at init-message construction. Mount does not subscribe to widget state. The per-key bindings subscribe — the same `observe()` pattern that exists today. |
+| Initial props read — reactive dep? | Callable props are read via `isolate(fn())` at init-message construction. Static props pass through literally. Mount itself does not subscribe to widget props. The per-key bindings (one per callable prop) subscribe — same `observe()` pattern as existing reactive attrs. |
 | Widget events sharing timing / sequence machinery? | Yes. Widget events ride `irid-events` with `source: "widget"`. The client initializes managed state (throttle/debounce/coalesce/sequence) but skips `addEventListener`. The widget JS pushes via `irid.sendWidgetEvent`, which routes through the managed state and `Shiny.setInputValue` — `.event` config and stale indicator work transparently. |
 | Race: script not loaded when init arrives? | Registry queue. Inits buffer per type until `defineWidget(type, ...)` lands; drained on registration. |
 | Race: `<script src>` re-execution on re-insertion? | Avoided. Deps never flow through swap/mutate HTML. They ride `irid-widget-init` and `Shiny.renderDependencies` dedupes — one `<script>` fetch per session. |
@@ -798,26 +856,34 @@ The widget mechanism extends three existing testing surfaces and adds a
 fourth:
 
 - **`process_tags` extraction** gets:
-  - widget node produces `$widget_inits` entry with `{id, type, config, state_fns, deps}`
-  - state keys become `$bindings` with `attr = "widget:<key>"`
+  - widget node produces `$widget_inits` entry with `{id, type, prop_fns, static_props, deps}`
+  - callable prop keys become `$bindings` with `attr = "widget:<key>"`
+  - non-callable prop keys produce no binding (their value rides in
+    `static_props` on the init message only)
   - events become `$events` with `source = "widget"`
   - container `id` and `data-irid-widget` are set on the output tag
+  - mixed-shape `props` list (some callables, some not) is fully
+    supported — each key dispatches on `is.function()` independently
 
 - **Public helper `can_accept_write()`** gets:
   - returns `TRUE` for primitives, closures with ≥1 formal,
     `reactiveVal`, store leaves, `reactiveProxy` with a setter
   - returns `FALSE` for `reactive(...)`, `\() expr` closures,
-    `reactiveProxy` with no setter
+    `reactiveProxy` with no setter, non-callables
   - exported from the package (rename of internal
     `can_accept_write` in `process_tags.R`, or wrapper around it)
   - documented with the wrapper-author autobind pattern as the canonical
     use case
 
 - **Observer lifecycle** gets:
-  - destroying the enclosing mount tears down widget state observers and event observers
+  - destroying the enclosing mount tears down widget prop observers and event observers
   - widget inside `When` mounts/unmounts on toggle (init message after swap; destroy via detach walker)
   - widget inside keyed `Each` survives reorder (`insertBefore` preserves identity; no init re-send)
   - widget inside positional `Each` survives same-length in-place updates (per-key updates via `irid-attr widget:*`)
+  - constant prop with same value across re-render fires no update (no observer registered)
+  - reactive prop passed to a key the widget's JS doesn't handle: the
+    update message arrives, the JS `update` falls through, no
+    error — silently one-shot in effect
 
 - **Client-side handling** gets:
   - `irid-attr` with `widget:<key>` routes to the widget's `update` hook
@@ -828,8 +894,9 @@ fourth:
   - duplicate `irid-widget-init` for the same id is a no-op
 
 - **Widget API contract** (new surface):
-  - factory called once per mount with `(el, state, config, send)`
+  - factory called once per mount with `(el, props, send)`
   - `update(key, value, sequence)` called for each `irid-attr widget:*`
+    (only for keys that were callable on the R side)
   - `send(event, payload)` is a no-op if no R subscriber exists
   - `destroy()` called before container detachment
 
