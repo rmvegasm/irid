@@ -177,6 +177,21 @@
   //            `getElementById(msg.id)`. Includes focused-element
   //            optimistic-update gating for `attr === "value"`.
   Shiny.addCustomMessageHandler('irid-attr', function(msg) {
+    // Universal stale-echo gate. When the user produces events faster
+    // than the server can echo them back, an echo for an earlier value
+    // can arrive after newer ones have been sent. `sequences[id]` is
+    // bumped in `attachPayloadMeta` on every outbound event, so it
+    // moves ahead of an in-flight echo as soon as the user produces
+    // another event from the same element. The check is inert when no
+    // sequence is present (programmatic updates from a different
+    // element) or when sequences hasn't moved past the echo's seq
+    // (echo is current).
+    if (msg.sequence !== undefined && msg.sequence !== null &&
+        sequences[msg.id] !== undefined &&
+        msg.sequence < sequences[msg.id]) {
+      return;
+    }
+
     if (msg.target === 'widget') {
       // Route to the widget's update hook. Skip if no widget is
       // registered for this id — covers the timing-dependent reorder
@@ -211,14 +226,16 @@
     // target === 'dom'
     var el = document.getElementById(msg.id);
     if (!el) return;
-    if (msg.attr === 'value' && document.activeElement === el) {
-      if (msg.sequence !== undefined && msg.sequence !== null) {
-        if (sequences[msg.id] !== undefined && msg.sequence < sequences[msg.id]) {
-          return; // Stale echo from earlier event, skip
-        }
-      }
-      // Programmatic (no sequence) or up-to-date: apply, but skip no-op
-      if (el.value === msg.value) return;
+    // Cursor-preservation no-op skip — independent of the staleness gate
+    // above. Setting `el.value` to its current string would reset the
+    // cursor on a focused input, so short-circuit identical writes.
+    // The widget path doesn't get a parallel skip here because "current
+    // value" is library-specific (CodeMirror's `view.state.doc`, Plotly's
+    // layout, etc.); widget authors do the equivalent `value === current`
+    // check inside their factory's `update` hook.
+    if (msg.attr === 'value' && document.activeElement === el &&
+        el.value === msg.value) {
+      return;
     }
     if (PROP_ATTRS[msg.attr]) {
       el[msg.attr] = msg.value;
