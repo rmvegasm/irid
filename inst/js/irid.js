@@ -200,7 +200,7 @@
       var w = widgets[msg.id];
       if (!w) return;
       if (typeof w.handle.update === 'function') {
-        w.handle.update(msg.attr, msg.value, msg.sequence);
+        w.handle.update(msg.attr, msg.value);
       }
       return;
     }

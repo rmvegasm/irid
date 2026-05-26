@@ -74,8 +74,8 @@ Walks the tag tree recursively and produces:
     (`<option>`, `<textarea>`, ...) where a `<span>` wrapper would be
     stripped by the HTML parser.
   - `target = "widget"` rows are `{id, target, attr, fn}` — the binding
-    routes per-key updates to the widget instance's `update(key, value,
-    sequence)` hook.
+    routes per-key updates to the widget instance's `update(key, value)`
+    hook.
 - **`events`** — List of `{id, event, handler, source, mode, ms, leading, coalesce, prevent_default}`,
   one entry per `(id, event)`. `source = "dom"` for events attached to
   a DOM element via `addEventListener`; `source = "widget"` for events
@@ -299,9 +299,11 @@ everything between the start and end anchors (running
 `Shiny.unbindAll` on each removed element), and inserts a single
 text node when `value` is non-empty. For `"widget"`: looks up the
 widget registered at `msg.id` and calls `handle.update(msg.attr,
-msg.value, msg.sequence)`; the widget's update hook owns the
-"compare against current state, skip on match" logic — irid stays
-generic because what counts as "current state" is library-specific.
+msg.value)`; the widget's update hook owns the "compare against
+current state, skip on match" logic — irid stays generic because
+what counts as "current state" is library-specific. The universal
+stale-echo gate above ensures the widget never sees out-of-order
+values, so the hook doesn't need a sequence argument.
 
 ### `irid-swap`
 
@@ -587,7 +589,7 @@ irid.defineWidget("codemirror", function (el, props, send) {
   // send:  send(event, payload) — push events through irid's pipeline
   var view = new EditorView({ /* ... */ });
   return {
-    update: function (key, value, sequence) {
+    update: function (key, value) {
       if (key === "content" && value !== view.state.doc.toString()) {
         view.dispatch({ /* ... */ });
       }

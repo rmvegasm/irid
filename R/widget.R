@@ -91,7 +91,7 @@ event_defaults <- function(user, ...) {
 #' looked up by `name` and called once per mount.
 #'
 #' Reactive `props` open a one-way observer (server → client), routed
-#' client-side to the widget's `update(key, value, sequence)` hook. Event
+#' client-side to the widget's `update(key, value)` hook. Event
 #' handlers in `events` go in the other direction: the widget JS calls
 #' `send(event, payload)`, the payload arrives R-side through the
 #' standard `irid-events` machinery (timing, sequence, stale-indicator

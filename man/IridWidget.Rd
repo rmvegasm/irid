@@ -50,7 +50,7 @@ looked up by \code{name} and called once per mount.
 }
 \details{
 Reactive \code{props} open a one-way observer (server → client), routed
-client-side to the widget's \code{update(key, value, sequence)} hook. Event
+client-side to the widget's \code{update(key, value)} hook. Event
 handlers in \code{events} go in the other direction: the widget JS calls
 \code{send(event, payload)}, the payload arrives R-side through the
 standard \code{irid-events} machinery (timing, sequence, stale-indicator

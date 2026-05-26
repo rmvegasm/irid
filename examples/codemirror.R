@@ -78,7 +78,7 @@ CodeMirrorDeps <- function() {
     });
 
     return {
-      update: function (key, value, sequence) {
+      update: function (key, value) {
         if (key === "content") {
           const current = view.state.doc.toString();
           if (value === current) return;
