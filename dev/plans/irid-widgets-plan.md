@@ -61,8 +61,12 @@ suggested dependency; bundling it with the framework would muddy the
   2. Walks `node$props`: per-key dispatch on `is_irid_reactive()`
      (matches the existing rule — `is.function(x) && (identical(class(x),
      "function") || inherits(x, "reactive"))`). Callable → `bindings`
-     with `attr = paste0("widget:", key)`, `fn = prop`. Non-callable →
-     accumulated into `static_props`.
+     with `{id, attr = key, fn = prop, target = "widget"}`. Non-callable
+     → accumulated into `static_props`. The binding row gains a new
+     `target` field (semantics: where does this mutation land?) —
+     existing DOM-attr / `irid:text` bindings get `target = "dom"`
+     set explicitly at the existing extraction sites so every row in
+     `bindings_by_id` carries a known target.
   3. Iterates `node$events`: each entry produces an `events` row with
      `source = "widget"`, the handler verbatim, the event name verbatim
      (lowercase kebab — no `on*` stripping). Timing comes from `.event`
@@ -123,19 +127,25 @@ suggested dependency; bundling it with the framework would muddy the
      `inserts` / `order`) before recursing. Either way, the init
      message — sent from inside that recursive call — naturally
      arrives after the DOM change that introduced the element.
-- The per-key `widget:<key>` observers fall out of the existing
-  bindings path: a binding with `attr = "widget:content"` is
-  observable identically to one with `attr = "value"`; the only
-  change is `attr` is forwarded verbatim in the existing
-  `irid-attr` message (no protocol change on the R side).
+- The per-key widget observers fall out of the existing bindings
+  path: a binding with `attr = "content", target = "widget"` is
+  observable identically to a DOM binding with `attr = "value",
+  target = "dom"`. The binding observer's `irid-attr` message
+  construction reads both fields off the binding row and emits them
+  verbatim, so widget vs DOM dispatch is a pure data-flow change.
 - Event entries with `source = "widget"` get `observeEvent` registered
-  on the same `irid_ev_<id>_<event>` input pattern as DOM events;
-  the only thing that changes is that the `irid-events` message
-  forwards `source: "widget"` to the client so the client knows to
-  skip `addEventListener`. Add `source = ev$source %||% "dom"` to
-  the message-construction `lapply` so existing DOM events default
-  cleanly.
-- `irid-events` payload gains an optional `source` field.
+  on the same `irid_ev_<id>_<event>` input pattern as DOM events.
+  The `irid-events` message construction reads `source` off the
+  event row (set to `"widget"` or `"dom"` at extraction time — no
+  `%||%` default, every event row has it explicitly) and forwards
+  it to the client so the client knows whether to call
+  `addEventListener`.
+- `irid-attr` payload gains a required `target` field with values
+  `"widget"` or `"dom"` (semantics: where the mutation lands).
+  `irid-events` payload gains a required `source` field with the
+  same value vocabulary (semantics: where the event originates).
+  Different field names, intentionally — events have a source;
+  attrs have a target.
 - The force-send-on-no-op loop (`bindings_by_id[[source_id]]` echo
   in the event observer, [R/mount.R:86-94](../../R/mount.R#L86-L94)) is
   untouched and works for widget bindings out of the box — widget
@@ -219,12 +229,14 @@ suggested dependency; bundling it with the framework would muddy the
      payload) { sendWidgetEvent(msg.id, event, payload); }` (the
      private function — see above). Store the returned
      `{update, destroy}` in `widgets[id]`.
-- Update the `irid-attr` handler: if `msg.attr` starts with `widget:`,
-  look up `widgets[msg.id]`, call `handle.update(key, msg.value,
-  msg.sequence)` where `key = msg.attr.slice(7)`. Skip if no widget
-  is registered (timing-dependent reorder where the update arrives
-  before the init — buffer or drop; for now drop with no error,
-  same posture as `document.getElementById(msg.id)` returning null).
+- Update the `irid-attr` handler: dispatch on `msg.target`. For
+  `"widget"`: look up `widgets[msg.id]` and call
+  `handle.update(msg.attr, msg.value, msg.sequence)`; skip if no
+  widget is registered (timing-dependent reorder where the update
+  arrives before the init — drop with no error, same posture as
+  `document.getElementById(msg.id)` returning null). For `"dom"`:
+  the existing logic (PROP_ATTRS dispatch, focused-element gating,
+  setAttribute / removeAttribute) runs unchanged.
 - Update the `irid-events` handler: if `msg.source === "widget"`,
   initialize managed-state via the same `setupThrottle` / `setupDebounce` /
   `setupImmediate` paths but **skip the `el.addEventListener` step**.
@@ -239,10 +251,12 @@ suggested dependency; bundling it with the framework would muddy the
   are still intact.
 
 **No changes to existing message types beyond additive fields** —
-this is the entire wire-protocol delta. `irid-attr` gains the
-`widget:*` attr shape (already structurally allowed); `irid-events`
-gains an optional `source` field defaulting to `"dom"`; `irid-widget-init`
-is the only new message. Shape:
+this is the entire wire-protocol delta. `irid-attr` gains a required
+`target` field; `irid-events` gains a required `source` field. Both
+use values `"widget"` or `"dom"`, always set explicitly on every
+message (no implicit defaults). The field-name asymmetry is
+intentional and semantic: events have a source, attrs have a target.
+`irid-widget-init` is the only new message. Shape:
 
 ```js
 {
@@ -255,8 +269,9 @@ is the only new message. Shape:
 
 `props` is one merged object (callable-on-R-side keys and constant-on-
 R-side keys arrive identically — the distinction shows up only in
-whether subsequent `irid-attr widget:<key>` messages arrive for that
-key). `deps` is the list lifted from `widget_inits` server-side.
+whether subsequent `irid-attr` messages with `target: "widget"`
+arrive for that key). `deps` is the list lifted from `widget_inits`
+server-side.
 
 ### Tests
 
@@ -266,7 +281,7 @@ Add to `tests/testthat/`:
 
 - Widget node produces a `$widget_inits` entry with `{id, name,
   prop_fns, static_props, deps}`
-- Callable prop keys become `$bindings` with `attr = "widget:<key>"`
+- Callable prop keys become `$bindings` with `attr = key, target = "widget"`
 - Non-callable prop keys produce no binding; their value rides in
   `static_props`
 - Events become `$events` with `source = "widget"`
@@ -312,8 +327,9 @@ captured here):
 - Widget inside keyed `Each` survives reorder (no init re-send;
   `insertBefore` preserves identity)
 - Widget inside positional `Each` survives same-length in-place
-  updates (per-key updates via `irid-attr widget:*`)
-- `irid-attr widget:<key>` routes to the widget's `update` hook
+  updates (per-key updates via `irid-attr` with `target: "widget"`)
+- `irid-attr` with `target: "widget"` routes to the widget's
+  `update` hook
 - `irid-events` with `source: "widget"` initializes managed state
   but skips `addEventListener`
 - The `send` closure passed to factories builds payload via the
@@ -334,14 +350,16 @@ CodeMirror example in Commit 2 and the plotly example in Commit 3.
    object). `process_tags` extension. Tests for `process_tags`
    extraction.
 3. R-side: `irid_mount_processed` extension — `widget_inits` →
-   `irid-widget-init` message, `widget:<key>` bindings, `source =
-   "widget"` events. No client work yet; tests inspect message
+   `irid-widget-init` message, widget bindings (emit `target:
+   "widget"` on `irid-attr`), widget events (emit `source: "widget"`
+   on `irid-events`). No client work yet; tests inspect message
    shape via a session stub.
 4. R-side: deps hoisting into `iridApp` / `renderIrid`. Top-level
    `attachDependencies` collects from `widget_inits`.
 5. JS-side: `defineWidget` / `sendWidgetEvent` / `irid-widget-init`
-   handler / `widget:*` routing in `irid-attr` / `source: "widget"`
-   in `irid-events` / detach walker for `data-irid-widget`.
+   handler / `target: "widget"` dispatch in `irid-attr` /
+   `source: "widget"` dispatch in `irid-events` / detach walker for
+   `data-irid-widget`.
 6. `devtools::document()` to regenerate `NAMESPACE` for the new
    exports.
 
