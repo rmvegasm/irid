@@ -136,6 +136,30 @@ test_that("write_back(NULL, field, then = fn) with 0-arg then fires then()", {
   expect_true(fired)
 })
 
+# `irid_write_targets` attribute drives the force-send-on-no-op loop in
+# mount.R — only bindings whose `attr` is in the firing event handler's
+# declared targets get echoed. Without per-handler scoping, a debounced
+# binding's stale server value can clobber in-flight client state.
+
+test_that("write_back tags its returned handler with irid_write_targets = field", {
+  rv <- shiny::reactiveVal("x")
+  h <- write_back(rv, "content")
+  expect_equal(attr(h, "irid_write_targets"), "content")
+})
+
+test_that("write_back with `then` still declares the field as a write target", {
+  rv <- shiny::reactiveVal("x")
+  h <- write_back(rv, "content", then = function(e) NULL)
+  expect_equal(attr(h, "irid_write_targets"), "content")
+})
+
+test_that("write_back(NULL, field, then = fn) declares NO write target", {
+  # NULL callable means no binding to echo — the handler is just side
+  # effects. Force-send should skip.
+  h <- write_back(NULL, "content", then = function(e) NULL)
+  expect_null(attr(h, "irid_write_targets"))
+})
+
 test_that("write_back errors at construction on a bad `field`", {
   rv <- shiny::reactiveVal("x")
   expect_error(write_back(rv, ""), "non-empty character scalar")

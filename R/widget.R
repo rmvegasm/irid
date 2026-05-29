@@ -42,12 +42,21 @@ write_back <- function(callable, field, then = NULL) {
   if (is.null(callable) && is.null(then)) return(NULL)
   force(callable); force(field); force(then)
   then_arity <- if (is.null(then)) NULL else length(formals(then))
-  function(e) {
+  h <- function(e) {
     if (!is.null(callable) && can_accept_write(callable)) callable(e[[field]])
     if (!is.null(then)) {
       if (then_arity == 0L) then() else then(e)
     }
   }
+  # Declare which binding this handler writes through, so the framework's
+  # force-send-on-no-op loop only echoes THIS binding (not every binding
+  # on the source element). Without this, an event whose handler doesn't
+  # write a particular binding's reactiveVal would still cause that
+  # binding's current value to be force-sent — and if the binding's
+  # write is debounced and hasn't delivered yet, the server reactiveVal
+  # is stale, and the client's in-flight state gets clobbered.
+  if (!is.null(callable)) attr(h, "irid_write_targets") <- field
+  h
 }
 
 #' Layer wrapper-default event-timing config under a caller's `.event`

@@ -60,18 +60,16 @@ CodeMirrorDeps <- function() {
           EditorView.updateListener.of(function (u) {
             if (u.docChanged) {
               send("change", { content: u.state.doc.toString() });
-            } else if (u.selectionSet) {
-              // Only fires on click / arrow / selection moves, NOT
-              // during typing — typing fires cursor-changed too in
-              // principle, but the resulting event triggers the
-              // framework\'s force-send-on-no-op loop for ALL bindings
-              // on the widget (currently `content`). When `change` is
-              // debounced and hasn\'t delivered yet, the force-send
-              // reads the server\'s stale `content()` and echoes it
-              // back, wiping the user\'s in-flight typing on the
-              // client. Cursor display lags during typing as a result
-              // — fixed once force-send becomes per-binding (see
-              // dev/widget-batched-updates-design.md).
+            }
+            if (u.selectionSet) {
+              // Fires on every selection move — clicks, arrow keys,
+              // and typing (typing advances the cursor). Independent
+              // of the docChanged branch so the cursor display stays
+              // accurate during typing. Safe to fire alongside change
+              // because the framework\'s force-send-on-no-op is now
+              // scoped per-binding: this event\'s handler (the
+              // wrapper\'s `onCursorChanged`) declares no write target,
+              // so it doesn\'t fan out to the `content` binding.
               const head = u.state.selection.main.head;
               const line = u.state.doc.lineAt(head);
               send("cursor-changed", {

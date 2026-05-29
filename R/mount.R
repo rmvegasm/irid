@@ -103,10 +103,24 @@ irid_mount_processed <- function(result, session, depth = 0L) {
         # binding observer won't fire and the client gets no echo. This
         # ensures the client always receives the authoritative value so
         # it can apply server transforms even on no-op updates.
+        #
+        # Scoped per-binding via `write_targets` — only echo the bindings
+        # this event's handler is registered to write through (via
+        # `write_back` or autobind). Hand-rolled handlers declare no
+        # targets and get no force-send: their bindings either fire
+        # naturally on change or the wrapper handles the echo itself.
+        # Without this filtering, an event whose handler doesn't write a
+        # particular binding's reactiveVal would still force-send that
+        # binding's current value — and if the binding's write is
+        # debounced and hasn't delivered yet, the server's stale value
+        # would overwrite in-flight client state.
         source_id <- ev_data[["id"]]
         source_bindings <- bindings_by_id[[source_id]]
-        if (!is.null(seq) && length(source_bindings) > 0L) {
+        write_targets <- ev$write_targets
+        if (!is.null(seq) && length(source_bindings) > 0L &&
+            !is.null(write_targets)) {
           for (sb in source_bindings) {
+            if (!(sb$attr %in% write_targets)) next
             val <- isolate(sb$fn())
             msg <- switch(sb$target,
               dom    = list(id = sb$id, target = "dom",    attr = sb$attr,

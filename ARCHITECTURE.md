@@ -645,6 +645,53 @@ head-only deps pass through unchanged. `Shiny.renderDependencies`
 dedups by name across the session, so re-firing `irid-widget-init` on
 a remount is a no-op for the deps step.
 
+### Force-send is per-binding
+
+The event observer's force-send-on-no-op loop in `mount.R` only echoes
+bindings whose `attr` is in the firing event's declared write targets
+(`ev$write_targets`). `write_back(callable, field)` and the autobind
+synthetic-event factory (`make_autobind_handler`) both attach the
+target attr to the returned handler as an `irid_write_targets`
+attribute; `compose_handlers` unions across constituents;
+`process_tags` lifts the attribute onto each event row. **Hand-rolled
+handlers** (the wrapper author writes their own `function(e) {…}`
+without going through `write_back`) declare no targets and skip
+force-send entirely — they're responsible for echo correctness
+themselves, and the natural binding observer fires when the
+reactiveVal changes.
+
+Without this scoping, an event whose handler doesn't write a particular
+binding's reactiveVal would still cause that binding's current value to
+be force-sent. If the binding's write was debounced and hadn't delivered
+yet, the server's stale reactiveVal would be echoed back and clobber
+in-flight client state — concretely, the CodeMirror demo's
+`cursor-changed` event firing during typing would force-send `content`,
+overwriting the user's typed characters with the server's pre-typing
+value. Per-binding scoping eliminates this entire class of cross-binding
+clobber.
+
+### Known limitation — multi-binding wire-level visual atomicity
+
+A widget gets one `irid-attr` message per binding observer fire.
+Multiple bound props updating in the same flush ride independent
+messages on the wire. For libraries with incremental update primitives
+(CodeMirror handles separate `view.dispatch()` calls fine), the gap
+between messages is invisible. For libraries with atomic-render
+primitives (Plotly, Mapbox), each `irid-attr` triggers a full
+re-render — two messages = two redraws = visible flash.
+
+Specified in
+[dev/widget-batched-updates-design.md](dev/widget-batched-updates-design.md);
+deferred to a follow-up PR. The fix is per-widget batching — coalesce
+same-flush messages for one widget into a `values: {…}` map delivered
+as one `update(values)` call (a breaking widget-contract change). This
+is a visual-atomicity improvement, not a correctness one — the
+per-binding force-send fix above closes the correctness gap, so
+editor-class demos work today. Widget authors wrapping atomic-render
+libraries in the meantime should lump the related state into one
+bound prop with a structured value (Plotly's `{data, layout}`,
+Mapbox's `{center, zoom, bearing}`).
+
 ## Remaining Work
 
 ### `Portal` (planned)

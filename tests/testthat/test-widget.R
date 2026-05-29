@@ -166,6 +166,29 @@ test_that("events become $events rows with source='widget'", {
   expect_identical(ev$handler, h)
 })
 
+test_that("widget event rows carry the handler's write_targets attribute (via write_back)", {
+  rv <- shiny::reactiveVal("x")
+  w <- IridWidget(
+    "w",
+    props  = list(content = rv),
+    events = list(change = write_back(rv, "content"))
+  )
+  out <- process_tags(w)
+  expect_equal(out$events[[1]]$write_targets, "content")
+})
+
+test_that("widget event rows have NULL write_targets for hand-rolled handlers", {
+  # Hand-rolled handlers don't declare write targets → no force-send.
+  rv <- shiny::reactiveVal("x")
+  w <- IridWidget(
+    "w",
+    props  = list(content = rv),
+    events = list(change = function(e) NULL)
+  )
+  out <- process_tags(w)
+  expect_null(out$events[[1]]$write_targets)
+})
+
 test_that("widget event default timing is event_immediate() for every event", {
   w <- IridWidget("w", events = list(
     change = function(e) NULL,

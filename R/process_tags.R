@@ -46,11 +46,17 @@ state_bind_event <- function(attr_name, tag_name) {
 make_autobind_handler <- function(fn, attr_name) {
   force(fn)
   force(attr_name)
-  if (can_accept_write(fn)) {
+  h <- if (can_accept_write(fn)) {
     function(e) fn(e[[attr_name]])
   } else {
     function(e) NULL
   }
+  # Declare the write target for the framework's force-send-on-no-op
+  # loop. Both writable and read-only autobind handlers declare it —
+  # read-only specifically NEEDS force-send to snap the input back to
+  # the canonical value.
+  attr(h, "irid_write_targets") <- attr_name
+  h
 }
 
 # Shared validation for element-level keyed-list props (`.event`,
@@ -211,7 +217,11 @@ resolve_event_config <- function(event_name, lookup) {
 # fans out per source handler.
 compose_handlers <- function(handlers) {
   arities <- vapply(handlers, function(h) length(formals(h)), integer(1L))
-  function(event, id) {
+  targets <- unique(unlist(
+    lapply(handlers, function(h) attr(h, "irid_write_targets")),
+    use.names = FALSE
+  ))
+  composed <- function(event, id) {
     for (i in seq_along(handlers)) {
       h <- handlers[[i]]
       a <- arities[[i]]
@@ -220,6 +230,13 @@ compose_handlers <- function(handlers) {
       else h(event, id)
     }
   }
+  # Union of constituent write targets so force-send fans out across all
+  # bindings the composed handler covers. A composed handler with no
+  # write_back/autobind constituents has no targets → no force-send.
+  if (length(targets) > 0L) {
+    attr(composed, "irid_write_targets") <- targets
+  }
+  composed
 }
 
 # Merge pending events that share a DOM event name (e.g. auto-bind synthetic
@@ -355,6 +372,7 @@ process_tags <- function(tag, counter = irid_id_counter()) {
         if (is.null(cfg)) cfg <- widget_default_for_event(event_name)
         events[[length(events) + 1L]] <<- list(
           id = id, event = event_name, handler = handler,
+          write_targets = attr(handler, "irid_write_targets"),
           mode = cfg$mode, ms = cfg$ms,
           leading = cfg$leading, coalesce = cfg$coalesce,
           prevent_default = FALSE,
@@ -566,6 +584,7 @@ process_tags <- function(tag, counter = irid_id_counter()) {
       for (e in pending_events) {
         e$id <- id
         e$source <- "dom"
+        e$write_targets <- attr(e$handler, "irid_write_targets")
         events[[length(events) + 1L]] <<- e
       }
     }
