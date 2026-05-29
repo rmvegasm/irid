@@ -344,3 +344,50 @@ design.
   preferred camelCase spelling? Probably not — too much machinery for
   a one-off naming preference. The kebab fallback already gives
   authors latitude.
+
+---
+
+## 9. Follow-up — align `.event` and `events` keys with `on*` spelling (0.3.0)
+
+This design transforms `on*` arg names into wire event names, but leaves
+the `.event` timing config (and `IridWidget`'s `events = list(...)`)
+keyed on the *wire name*:
+
+```r
+tags$div(
+  onCursorChanged = handler,
+  .event = list("cursor-changed" = event_debounce(100))   # wire name
+)
+
+IridWidget(
+  "codemirror",
+  events = list("cursor-changed" = handler),              # wire name
+  .event = list("cursor-changed" = event_throttle(100))   # wire name
+)
+```
+
+That's a mental-model leak: authors write `on*` to register a handler,
+then have to re-spell the same event in wire form to configure its
+timing. The fix is to apply the same transformation rule (§2) to
+`.event` and `events` keys — authors write `on*` once and never see the
+wire name:
+
+```r
+tags$div(
+  onCursorChanged = handler,
+  .event = list(onCursorChanged = event_debounce(100))
+)
+
+IridWidget(
+  "codemirror",
+  events = list(onCursorChanged = handler),
+  .event = list(onCursorChanged = event_throttle(100))
+)
+```
+
+The escape hatch carries over verbatim: `` `on:webkit-fullscreen-change` ``
+works as a key just as it works as an arg name.
+
+This is a breaking change — every existing `.event` / `events` key
+breaks. Land it as a separate PR after this design, slated for the
+**0.3.0** release.
