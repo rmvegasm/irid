@@ -61,10 +61,17 @@ CodeMirrorDeps <- function() {
             if (u.docChanged) {
               send("change", { content: u.state.doc.toString() });
             } else if (u.selectionSet) {
-              // Cursor move without a doc change — typing also moves
-              // the cursor, but the doc-change branch already covers
-              // that case, so this fires only on click / arrow-key /
-              // selection moves.
+              // Only fires on click / arrow / selection moves, NOT
+              // during typing — typing fires cursor-changed too in
+              // principle, but the resulting event triggers the
+              // framework\'s force-send-on-no-op loop for ALL bindings
+              // on the widget (currently `content`). When `change` is
+              // debounced and hasn\'t delivered yet, the force-send
+              // reads the server\'s stale `content()` and echoes it
+              // back, wiping the user\'s in-flight typing on the
+              // client. Cursor display lags during typing as a result
+              // — fixed once force-send becomes per-binding (see
+              // dev/widget-batched-updates-design.md).
               const head = u.state.selection.main.head;
               const line = u.state.doc.lineAt(head);
               send("cursor-changed", {
@@ -107,17 +114,13 @@ CodeMirror <- function(
   onCursorChanged = NULL,
   .event          = NULL
 ) {
-  # Omit the cursor-changed event registration when no handler is supplied
-  # — keeps the managed-state table clean for callers who don't need it.
-  events <- list(change = write_back(content, "content", then = onChange))
-  if (!is.null(onCursorChanged)) {
-    events[["cursor-changed"]] <- onCursorChanged
-  }
-
   IridWidget(
     name   = "codemirror",
     props  = list(content = content, language = language, theme = theme),
-    events = events,
+    events = list(
+      change           = write_back(content, "content", then = onChange),
+      `cursor-changed` = onCursorChanged
+    ),
     deps   = CodeMirrorDeps(),
     container = tags$div(
       class = "border rounded",

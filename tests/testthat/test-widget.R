@@ -66,6 +66,40 @@ test_that("IridWidget accepts a single html_dependency or a list", {
   expect_equal(w2$deps, list(dep))
 })
 
+test_that("NULL entries in events are dropped before validation", {
+  # Mixed NULL + handler — the NULL entry is silently skipped so wrappers
+  # can forward optional handlers without conditional list-building.
+  h <- function(e) NULL
+  w <- IridWidget("w", events = list(change = h, `cursor-changed` = NULL))
+  expect_named(w$events, "change")
+  expect_length(w$events, 1L)
+
+  # All-NULL events list collapses to empty — no validation error.
+  w2 <- IridWidget("w", events = list(change = NULL, blur = NULL))
+  expect_length(w2$events, 0L)
+})
+
+test_that("NULL props are preserved through to static_props and JSON-serialize to JS null", {
+  # The construct keeps NULL props (no drop), so wrappers can declare
+  # their full prop shape with optional slots and the JS factory sees
+  # a predictable, complete object.
+  w <- IridWidget("w", props = list(content = "hi", cursor = NULL))
+  expect_setequal(names(w$props), c("content", "cursor"))
+
+  # process_tags routes them through static_props with the key intact
+  # (uses `[name]<-` to dodge R's NULL-removes-key quirk).
+  out <- process_tags(w)
+  sp <- out$widget_inits[[1]]$static_props
+  expect_setequal(names(sp), c("content", "cursor"))
+  expect_null(sp$cursor)
+
+  # Shiny's JSON serializer (`null = "null"`) turns NULL list entries
+  # into JS `null` — not `{}`, not absent — so the widget's `props`
+  # object always has the wrapper-declared keys.
+  json <- shiny:::toJSON(sp)
+  expect_match(as.character(json), '"cursor":null', fixed = TRUE)
+})
+
 # --- Extraction shape --------------------------------------------------------
 
 test_that("widget node produces a widget_inits entry", {

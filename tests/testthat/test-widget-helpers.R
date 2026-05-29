@@ -108,9 +108,32 @@ test_that("write_back with missing field passes NULL to callable", {
   expect_null(captured)
 })
 
-test_that("write_back errors at construction if callable isn't a function", {
-  expect_error(write_back("not a fn", "content"), "must be a function")
-  expect_error(write_back(NULL, "content"), "must be a function")
+test_that("write_back errors at construction if callable isn't a function or NULL", {
+  expect_error(write_back("not a fn", "content"), "function or NULL")
+  expect_error(write_back(42, "content"), "function or NULL")
+})
+
+test_that("write_back(NULL, field) with no `then` returns NULL (IridWidget drops it)", {
+  # Collapsed to NULL so the wrapper's events entry vanishes — declarative
+  # forwarding of optional `cursor`/`onCursorChanged` without conditionals.
+  expect_null(write_back(NULL, "content"))
+})
+
+test_that("write_back(NULL, field, then = fn) returns a handler that just runs `then`", {
+  # NULL callable + non-NULL then = "no write target, but the wrapper still
+  # wants the discrete onCursorChanged callback to fire."
+  seen <- NULL
+  h <- write_back(NULL, "content", then = function(e) seen <<- e$content)
+  expect_true(is.function(h))
+  h(list(content = "x"))
+  expect_equal(seen, "x")
+})
+
+test_that("write_back(NULL, field, then = fn) with 0-arg then fires then()", {
+  fired <- FALSE
+  h <- write_back(NULL, "content", then = function() fired <<- TRUE)
+  h(list(content = "x"))
+  expect_true(fired)
 })
 
 test_that("write_back errors at construction on a bad `field`", {

@@ -8,8 +8,10 @@ write_back(callable, field, then = NULL)
 }
 \arguments{
 \item{callable}{A callable that will receive \code{e[[field]]} on write
-(typically a \code{reactiveVal}, store leaf, or \code{reactiveProxy}).
-Errors at construction if not a function.}
+(typically a \code{reactiveVal}, store leaf, or \code{reactiveProxy}), or
+\code{NULL} for "no write target." With both \code{callable} and \code{then}
+\code{NULL}, returns \code{NULL} so the wrapper's \verb{events =} entry collapses
+to nothing (IridWidget drops NULL entries).}
 
 \item{field}{The payload field name to read on each event.}
 
@@ -17,7 +19,8 @@ Errors at construction if not a function.}
 1-arg accepted.}
 }
 \value{
-A 1-arg function suitable for an \code{\link[=IridWidget]{IridWidget()}} \verb{events =} entry.
+A 1-arg function suitable for an \code{\link[=IridWidget]{IridWidget()}} \verb{events =}
+entry — or \code{NULL} if both \code{callable} and \code{then} are \code{NULL}.
 }
 \description{
 Returns an event handler that:

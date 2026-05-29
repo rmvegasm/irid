@@ -19,16 +19,19 @@
 #' extra to get this behavior.
 #'
 #' @param callable A callable that will receive `e[[field]]` on write
-#'   (typically a `reactiveVal`, store leaf, or `reactiveProxy`).
-#'   Errors at construction if not a function.
+#'   (typically a `reactiveVal`, store leaf, or `reactiveProxy`), or
+#'   `NULL` for "no write target." With both `callable` and `then`
+#'   `NULL`, returns `NULL` so the wrapper's `events =` entry collapses
+#'   to nothing (IridWidget drops NULL entries).
 #' @param field The payload field name to read on each event.
 #' @param then Optional side handler called after the write. 0-arg or
 #'   1-arg accepted.
-#' @return A 1-arg function suitable for an [IridWidget()] `events =` entry.
+#' @return A 1-arg function suitable for an [IridWidget()] `events =`
+#'   entry — or `NULL` if both `callable` and `then` are `NULL`.
 #' @export
 write_back <- function(callable, field, then = NULL) {
-  if (!is.function(callable)) {
-    stop("`callable` must be a function", call. = FALSE)
+  if (!is.null(callable) && !is.function(callable)) {
+    stop("`callable` must be a function or NULL", call. = FALSE)
   }
   if (!is.character(field) || length(field) != 1L || !nzchar(field)) {
     stop("`field` must be a non-empty character scalar", call. = FALSE)
@@ -36,10 +39,11 @@ write_back <- function(callable, field, then = NULL) {
   if (!is.null(then) && !is.function(then)) {
     stop("`then` must be a function or NULL", call. = FALSE)
   }
+  if (is.null(callable) && is.null(then)) return(NULL)
   force(callable); force(field); force(then)
   then_arity <- if (is.null(then)) NULL else length(formals(then))
   function(e) {
-    if (can_accept_write(callable)) callable(e[[field]])
+    if (!is.null(callable) && can_accept_write(callable)) callable(e[[field]])
     if (!is.null(then)) {
       if (then_arity == 0L) then() else then(e)
     }
@@ -105,10 +109,18 @@ event_defaults <- function(user, ...) {
 #'   character scalar.
 #' @param props Named list of inputs (server → client). Per-key dispatch
 #'   on [is.function()]: callable values become observers; non-callable
-#'   values ride in the init message as constants.
+#'   values ride in the init message as constants. `NULL` entries are
+#'   forwarded to JS as `null` (not dropped), so wrappers can declare
+#'   their full prop shape with optional slots
+#'   (`props = list(content = ..., cursor = cursor)` where `cursor` may
+#'   be `NULL`) and the JS factory sees a predictable, complete object.
 #' @param events Named list of event handlers (client → server). Keys
 #'   are lowercase kebab-case event names (matching the web's
-#'   `CustomEvent` convention). Each value is a 0/1/2-arg handler.
+#'   `CustomEvent` convention). Each value is a 0/1/2-arg handler, or
+#'   `NULL` — `NULL` entries are dropped, so wrappers can forward an
+#'   optional handler declaratively without conditional list-building:
+#'   `events = list(change = ..., `cursor-changed` = onCursorChanged)`
+#'   skips the cursor registration when the caller didn't pass one.
 #' @param deps Optional `html_dependency` or list of them. Required for
 #'   any widget whose JS isn't already loaded by some other means.
 #' @param container Optional `shiny.tag` for the wrapper element.
@@ -145,6 +157,9 @@ IridWidget <- function(
     stop("`events` must be a list; got ",
          paste(class(events), collapse = "/"), call. = FALSE)
   }
+  # NULL entries are dropped so wrappers can forward optional handlers
+  # declaratively (see @param events).
+  events <- events[!vapply(events, is.null, logical(1L))]
   if (length(events) > 0L) {
     e_nms <- names(events)
     if (is.null(e_nms) || any(!nzchar(e_nms))) {

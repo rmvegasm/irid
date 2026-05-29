@@ -20,11 +20,19 @@ character scalar.}
 
 \item{props}{Named list of inputs (server → client). Per-key dispatch
 on \code{\link[=is.function]{is.function()}}: callable values become observers; non-callable
-values ride in the init message as constants.}
+values ride in the init message as constants. \code{NULL} entries are
+forwarded to JS as \code{null} (not dropped), so wrappers can declare
+their full prop shape with optional slots
+(\code{props = list(content = ..., cursor = cursor)} where \code{cursor} may
+be \code{NULL}) and the JS factory sees a predictable, complete object.}
 
 \item{events}{Named list of event handlers (client → server). Keys
 are lowercase kebab-case event names (matching the web's
-\code{CustomEvent} convention). Each value is a 0/1/2-arg handler.}
+\code{CustomEvent} convention). Each value is a 0/1/2-arg handler, or
+\code{NULL} — \code{NULL} entries are dropped, so wrappers can forward an
+optional handler declaratively without conditional list-building:
+\verb{events = list(change = ..., }cursor-changed\verb{ = onCursorChanged)}
+skips the cursor registration when the caller didn't pass one.}
 
 \item{deps}{Optional \code{html_dependency} or list of them. Required for
 any widget whose JS isn't already loaded by some other means.}

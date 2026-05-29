@@ -325,7 +325,11 @@ process_tags <- function(tag, counter = irid_id_counter()) {
 
       # Per-key dispatch on `is_irid_reactive()`. Callables become
       # `target = "widget"` bindings (one observer per key); non-callables
-      # ride in the init message as constants.
+      # ride in the init message as constants. `static_props[key] <- list(val)`
+      # (single-bracket) preserves NULL entries — `[[<-` would drop them
+      # via R's NULL-removes-key quirk. Shiny's `null = "null"` JSON option
+      # then serializes them to JS `null`, giving the widget factory a
+      # complete, predictable props object.
       prop_fns <- list()
       static_props <- list()
       for (key in names(node$props)) {
@@ -336,7 +340,7 @@ process_tags <- function(tag, counter = irid_id_counter()) {
             id = id, target = "widget", attr = key, fn = val
           )
         } else {
-          static_props[[key]] <- val
+          static_props[key] <- list(val)
         }
       }
 
