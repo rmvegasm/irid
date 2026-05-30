@@ -9,8 +9,7 @@ IridWidget(
   props = list(),
   events = list(),
   deps = NULL,
-  container = NULL,
-  .event = NULL
+  container = NULL
 )
 }
 \arguments{
@@ -26,25 +25,19 @@ their full prop shape with optional slots
 (\code{props = list(content = ..., cursor = cursor)} where \code{cursor} may
 be \code{NULL}) and the JS factory sees a predictable, complete object.}
 
-\item{events}{Named list of event handlers (client → server). Keys
-are lowercase kebab-case event names (matching the web's
-\code{CustomEvent} convention). Each value is a 0/1/2-arg handler, or
-\code{NULL} — \code{NULL} entries are dropped, so wrappers can forward an
-optional handler declaratively without conditional list-building:
-\verb{events = list(change = ..., }cursor-changed\verb{ = onCursorChanged)}
-skips the cursor registration when the caller didn't pass one.}
+\item{events}{List of \code{\link[=widget_event]{widget_event()}} records (client → server). Each
+record bundles wire-name, timing config, and handler for one event
+the widget JS can dispatch. \code{NULL} entries (from \code{widget_event()}
+calls whose handler was \code{NULL}) are dropped, so wrappers can forward
+optional handlers declaratively.}
 
 \item{deps}{Optional \code{html_dependency} or list of them. Required for
 any widget whose JS isn't already loaded by some other means.}
 
 \item{container}{Optional \code{shiny.tag} for the wrapper element.
 Defaults to \code{tags$div()}. irid sets \code{id} and \code{data-irid-widget}
-automatically.}
-
-\item{.event}{Element-level event-timing config — same shape as on a
-plain tag (\code{event_immediate()} / \code{event_throttle()} / \code{event_debounce()},
-or a named list keyed by event). Applies to both widget events and
-any DOM events on the container.}
+automatically. Set \code{.event} on the container directly to control
+timing for any DOM events on the container.}
 }
 \value{
 A irid widget construct with class \code{irid_widget}.

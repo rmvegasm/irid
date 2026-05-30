@@ -13,7 +13,7 @@ R/
   mini_store.R    make_mini_store / make_slot_accessor / is_record — per-item / per-case projections used by Each and Match
   scope.R         make_scope — per-item / per-case lifetime container; shim for shiny#4372 subdomain teardown
   proxy.R         reactiveProxy — callable built from a reader and optional writer
-  widget.R        IridWidget + write_back / event_defaults helpers + dep-registration
+  widget.R        IridWidget + widget_event / write_back helpers + dep-registration
   irid-package.R Package-level imports
 
 inst/js/
@@ -563,11 +563,15 @@ Three helpers make this idiomatic:
 - **`write_back(callable, field, then = NULL)`** — the handler factory.
   Returns a 1-arg function that writes `e[[field]]` to `callable` iff
   writable, then calls the optional `then` handler (arity-dispatched).
-  One line per round-trip key in the wrapper's `events =` list.
-- **`event_defaults(user, ...)`** — three-tier resolution for `.event`:
-  caller's value (highest, scalar wins everywhere; named list wins per
-  event) > wrapper defaults (the `...` entries) > framework default.
-  Generic — plain-tag wrappers can use it too.
+  One line per round-trip key in the wrapper's `widget_event()` calls.
+- **`widget_event(name, handler, timing)`** — per-event record bundling
+  wire-name, handler, and timing config (defaults to `event_immediate()`).
+  Wrappers build a list of these as the `events =` arg to `IridWidget()`.
+  Returns `NULL` when handler is `NULL` so optional handlers can be
+  forwarded declaratively (`IridWidget` drops `NULL` entries). Wrappers
+  that want to surface caller `.event` overrides typically define a
+  local `event_pick(user, key, default)` helper to compose inline; see
+  `examples/codemirror.R`.
 
 Read-only snap-back is automatic: even when `write_back`'s writability
 gate blocks the call, the event listener has already fired, and the

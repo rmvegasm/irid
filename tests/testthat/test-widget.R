@@ -37,12 +37,12 @@ test_that("IridWidget errors on malformed props/events", {
     "every entry in `props` must be named"
   )
   expect_error(
-    IridWidget("w", events = list("unnamed")),
-    "every entry in `events` must be named"
+    IridWidget("w", events = list("not a widget_event")),
+    "must be a `widget_event`"
   )
   expect_error(
-    IridWidget("w", events = list(change = "not a fn")),
-    "must be a function"
+    IridWidget("w", events = list(change = function(e) NULL)),
+    "must be a `widget_event`"
   )
 })
 
@@ -67,15 +67,21 @@ test_that("IridWidget accepts a single html_dependency or a list", {
 })
 
 test_that("NULL entries in events are dropped before validation", {
-  # Mixed NULL + handler — the NULL entry is silently skipped so wrappers
-  # can forward optional handlers without conditional list-building.
+  # `widget_event()` returns NULL when handler is NULL, so wrappers can
+  # forward optional handlers declaratively without conditional list-building.
   h <- function(e) NULL
-  w <- IridWidget("w", events = list(change = h, `cursor-changed` = NULL))
-  expect_named(w$events, "change")
+  w <- IridWidget("w", events = list(
+    widget_event(name = "change",         handler = h),
+    widget_event(name = "cursor-changed", handler = NULL)   # → NULL, dropped
+  ))
   expect_length(w$events, 1L)
+  expect_equal(w$events[[1]]$name, "change")
 
   # All-NULL events list collapses to empty — no validation error.
-  w2 <- IridWidget("w", events = list(change = NULL, blur = NULL))
+  w2 <- IridWidget("w", events = list(
+    widget_event(name = "change", handler = NULL),
+    widget_event(name = "blur",   handler = NULL)
+  ))
   expect_length(w2$events, 0L)
 })
 
@@ -157,7 +163,7 @@ test_that("mixed-shape props dispatch per-key", {
 
 test_that("events become $events rows with source='widget'", {
   h <- function(e) NULL
-  w <- IridWidget("w", events = list(change = h))
+  w <- IridWidget("w", events = list(widget_event(name = "change", handler = h)))
   out <- process_tags(w)
   expect_length(out$events, 1L)
   ev <- out$events[[1]]
@@ -171,7 +177,7 @@ test_that("widget event rows carry the handler's write_targets attribute (via wr
   w <- IridWidget(
     "w",
     props  = list(content = rv),
-    events = list(change = write_back(rv, "content"))
+    events = list(widget_event(name = "change", handler = write_back(rv, "content")))
   )
   out <- process_tags(w)
   expect_equal(out$events[[1]]$write_targets, "content")
@@ -183,17 +189,18 @@ test_that("widget event rows have NULL write_targets for hand-rolled handlers", 
   w <- IridWidget(
     "w",
     props  = list(content = rv),
-    events = list(change = function(e) NULL)
+    events = list(widget_event(name = "change", handler = function(e) NULL))
   )
   out <- process_tags(w)
   expect_null(out$events[[1]]$write_targets)
 })
 
-test_that("widget event default timing is event_immediate() for every event", {
+test_that("widget event default timing is event_immediate() when widget_event timing is omitted", {
+  h <- function(e) NULL
   w <- IridWidget("w", events = list(
-    change = function(e) NULL,
-    `cursor-changed` = function(e) NULL,
-    input = function(e) NULL  # no input→debounce(200) special case for widgets
+    widget_event(name = "change",         handler = h),
+    widget_event(name = "cursor-changed", handler = h),
+    widget_event(name = "input",          handler = h)   # no input→debounce(200) special case for widgets
   ))
   out <- process_tags(w)
   for (ev in out$events) {
@@ -248,7 +255,7 @@ test_that("container with DOM-event on* emits a source='dom' event on the same i
   click <- function(e) NULL
   w <- IridWidget(
     "w",
-    events = list(change = function(e) NULL),
+    events = list(widget_event(name = "change", handler = function(e) NULL)),
     container = htmltools::tags$div(onClick = click)
   )
   out <- process_tags(w)
@@ -262,69 +269,22 @@ test_that("container with DOM-event on* emits a source='dom' event on the same i
   expect_equal(by_event$change$id, by_event$click$id)
 })
 
-# --- .event resolution -------------------------------------------------------
+# --- widget_event timing -----------------------------------------------------
 
-test_that(".event scalar broadcasts to every widget event", {
-  w <- IridWidget(
-    "w",
-    events = list(change = function(e) NULL, blur = function(e) NULL),
-    .event = event_throttle(100)
-  )
-  out <- process_tags(w)
-  for (ev in out$events) {
-    expect_equal(ev$mode, "throttle")
-    expect_equal(ev$ms, 100)
-  }
-})
-
-test_that(".event named list overrides per event; unmapped events fall back to default", {
-  w <- IridWidget(
-    "w",
-    events = list(
-      change = function(e) NULL,
-      blur   = function(e) NULL
-    ),
-    .event = list(change = event_debounce(200))
-  )
+test_that("widget_event timing lands on the emitted event row", {
+  h <- function(e) NULL
+  w <- IridWidget("w", events = list(
+    widget_event(name = "change", handler = h, timing = event_debounce(200)),
+    widget_event(name = "blur",   handler = h, timing = event_throttle(100))
+  ))
   out <- process_tags(w)
   by_event <- setNames(out$events, vapply(out$events, function(e) e$event, character(1L)))
   expect_equal(by_event$change$mode, "debounce")
   expect_equal(by_event$change$ms, 200)
-  # `blur` not in the list — widget framework default is event_immediate().
-  expect_equal(by_event$blur$mode, "immediate")
+  expect_equal(by_event$blur$mode, "throttle")
+  expect_equal(by_event$blur$ms, 100)
 })
 
-test_that("event_defaults layered under caller .event lands correctly", {
-  # The wrapper's job: layer per-event defaults under the caller's .event.
-  user_event <- NULL  # caller passes nothing
-  layered <- event_defaults(
-    user_event,
-    change = event_debounce(200)
-  )
-  w <- IridWidget(
-    "w",
-    events = list(change = function(e) NULL),
-    .event = layered
-  )
-  out <- process_tags(w)
-  expect_equal(out$events[[1]]$mode, "debounce")
-  expect_equal(out$events[[1]]$ms, 200)
-})
-
-test_that("event_defaults: caller scalar overrides wrapper defaults", {
-  user_event <- event_immediate()
-  layered <- event_defaults(
-    user_event,
-    change = event_debounce(200)
-  )
-  w <- IridWidget(
-    "w",
-    events = list(change = function(e) NULL),
-    .event = layered
-  )
-  out <- process_tags(w)
-  expect_equal(out$events[[1]]$mode, "immediate")
-})
 
 # --- Deps --------------------------------------------------------------------
 

@@ -172,43 +172,59 @@ test_that("write_back errors at construction if `then` isn't a function or NULL"
                "function or NULL")
 })
 
-# --- event_defaults ----------------------------------------------------------
+# --- widget_event ------------------------------------------------------------
 #
-# Three-tier resolution: caller's `.event` > wrapper defaults > framework
-# default. `event_defaults` collapses the top two tiers; the third tier
-# lives in `process_tags` (`widget_default_for_event`).
+# Per-event record bundling wire name, handler, and timing for one widget
+# event. Returns NULL when handler is NULL so wrappers can forward optional
+# handlers declaratively (IridWidget drops NULL entries).
 
-test_that("event_defaults returns `...` list when user is NULL", {
-  out <- event_defaults(NULL, change = event_debounce(200), click = event_immediate())
-  expect_named(out, c("change", "click"))
-  expect_equal(out$change$mode, "debounce")
-  expect_equal(out$click$mode, "immediate")
+test_that("widget_event returns NULL when handler is NULL", {
+  expect_null(widget_event(name = "change", handler = NULL))
+  expect_null(widget_event(name = "change", handler = NULL, timing = event_debounce(200)))
 })
 
-test_that("event_defaults: caller scalar broadcasts, wrapper defaults dropped", {
-  user <- event_throttle(100)
-  out <- event_defaults(user, change = event_debounce(200))
-  # Returns the caller's scalar unchanged — process_tags will broadcast it.
-  expect_identical(out, user)
+test_that("widget_event builds a record with name, handler, timing", {
+  h <- function(e) NULL
+  t <- event_throttle(100)
+  w <- widget_event(name = "cursor-changed", handler = h, timing = t)
+  expect_s3_class(w, "widget_event")
+  expect_equal(w$name, "cursor-changed")
+  expect_identical(w$handler, h)
+  expect_identical(w$timing, t)
 })
 
-test_that("event_defaults: caller named list overrides per event, defaults fill in", {
-  out <- event_defaults(
-    list(click = event_throttle(50)),
-    change = event_debounce(200),
-    click = event_immediate()
+test_that("widget_event timing defaults to event_immediate()", {
+  h <- function(e) NULL
+  w <- widget_event(name = "change", handler = h)
+  expect_s3_class(w$timing, "irid_event_config")
+  expect_equal(w$timing$mode, "immediate")
+})
+
+test_that("widget_event errors on bad name", {
+  h <- function(e) NULL
+  expect_error(widget_event(name = "", handler = h), "non-empty character scalar")
+  expect_error(widget_event(name = c("a", "b"), handler = h), "non-empty character scalar")
+  expect_error(widget_event(name = NA_character_, handler = h), "non-empty character scalar")
+})
+
+test_that("widget_event errors on non-function handler", {
+  expect_error(widget_event(name = "change", handler = "string"), "must be a function or NULL")
+  expect_error(widget_event(name = "change", handler = 42), "must be a function or NULL")
+})
+
+test_that("widget_event errors on bad timing (including NULL)", {
+  h <- function(e) NULL
+  expect_error(
+    widget_event(name = "change", handler = h, timing = "not a config"),
+    "must be an `irid_event_config`"
   )
-  expect_equal(out$change$mode, "debounce")
-  expect_equal(out$click$mode, "throttle")
-  expect_equal(out$click$ms, 50)
+  expect_error(
+    widget_event(name = "change", handler = h, timing = list()),
+    "must be an `irid_event_config`"
+  )
+  expect_error(
+    widget_event(name = "change", handler = h, timing = NULL),
+    "must be an `irid_event_config`"
+  )
 })
 
-test_that("event_defaults with no `...` defaults still works", {
-  # `event_defaults(.event)` is a valid no-op when the wrapper has no
-  # opinions — should return the caller's value as-is.
-  expect_null(event_defaults(NULL))
-  scalar <- event_immediate()
-  expect_identical(event_defaults(scalar), scalar)
-  lst <- list(click = event_immediate())
-  expect_equal(event_defaults(lst), lst)
-})

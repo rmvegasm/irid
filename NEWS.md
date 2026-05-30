@@ -6,9 +6,9 @@
   Plotly, Leaflet, ...) as reactive irid components. Reactive props
   flow into the widget; events flow back out. Composes inside `When`,
   `Each`, and `Match` like any other irid construct. The helpers
-  `write_back()`, `event_defaults()`, and `can_accept_write()`
-  collapse the canonical wrapper round-trip to one line per state key.
-  See `examples/codemirror.R`.
+  `widget_event()`, `write_back()`, and `can_accept_write()` collapse
+  the canonical wrapper round-trip to one line per state key. See
+  `examples/codemirror.R`.
 
 ## Bug fixes
 

@@ -104,6 +104,21 @@ CodeMirrorDeps <- function() {
   )
 }
 
+# Local helper: resolve per-event timing from caller's `.event` —
+# scalar broadcasts, list lookup, fallback to default. Local because
+# scalar-broadcast `.event` and this helper are slated for removal in
+# 0.3.0 (the `.event` floor will accept `on*` keys, and the per-event
+# `event_pick(...)` call collapses to `.event$onName %||% default`).
+event_pick <- function(user, key, default) {
+  if (is.null(user)) return(default)
+  if (inherits(user, "irid_event_config")) return(user)
+  if (is.list(user)) {
+    val <- user[[key]]
+    if (!is.null(val)) return(val)
+  }
+  default
+}
+
 CodeMirror <- function(
   content,
   language        = "javascript",
@@ -116,18 +131,21 @@ CodeMirror <- function(
     name   = "codemirror",
     props  = list(content = content, language = language, theme = theme),
     events = list(
-      change           = write_back(content, "content", then = onChange),
-      `cursor-changed` = onCursorChanged
+      widget_event(
+        name    = "change",
+        handler = write_back(content, "content", then = onChange),
+        timing  = event_pick(.event, "change", event_debounce(200, coalesce = TRUE))
+      ),
+      widget_event(
+        name    = "cursor-changed",
+        handler = onCursorChanged,
+        timing  = event_pick(.event, "cursor-changed", event_throttle(100, coalesce = TRUE))
+      )
     ),
     deps   = CodeMirrorDeps(),
     container = tags$div(
       class = "border rounded",
       style = "height: 300px; overflow: hidden;"
-    ),
-    .event = event_defaults(
-      .event,
-      change           = event_debounce(200, coalesce = TRUE),
-      `cursor-changed` = event_throttle(100, coalesce = TRUE)
     )
   )
 }

@@ -361,18 +361,15 @@ process_tags <- function(tag, counter = irid_id_counter()) {
         }
       }
 
-      # Widget event timing — three-tier resolution. Caller `.event` is
-      # validated/normalized the same way DOM `.event` is. The framework
-      # default for widget events is `event_immediate()` for every event
-      # (no `input → debounce(200)` special case — that's DOM-tuned).
-      widget_event_lookup <- normalize_element_event(node$event_config)
-      for (event_name in names(node$events)) {
-        handler <- node$events[[event_name]]
-        cfg <- widget_event_lookup(event_name)
-        if (is.null(cfg)) cfg <- widget_default_for_event(event_name)
+      # Widget event timing comes from each `widget_event` record's
+      # `timing` slot (composed inline by the wrapper, typically via
+      # `event_pick()`). `widget_event()` defaults timing to
+      # `event_immediate()` so `ev$timing` is always non-NULL.
+      for (ev in node$events) {
+        cfg <- ev$timing
         events[[length(events) + 1L]] <<- list(
-          id = id, event = event_name, handler = handler,
-          write_targets = attr(handler, "irid_write_targets"),
+          id = id, event = ev$name, handler = ev$handler,
+          write_targets = attr(ev$handler, "irid_write_targets"),
           mode = cfg$mode, ms = cfg$ms,
           leading = cfg$leading, coalesce = cfg$coalesce,
           prevent_default = FALSE,
@@ -385,14 +382,6 @@ process_tags <- function(tag, counter = irid_id_counter()) {
         prop_fns = prop_fns, static_props = static_props,
         deps = node$deps
       )
-
-      # Forward the widget's `.event` onto the container so any DOM
-      # events on the container share the same timing lookup. Honor a
-      # container-set `.event` if present (specific wins over inherited).
-      if (is.null(container$attribs[[".event"]]) &&
-          !is.null(node$event_config)) {
-        container$attribs[[".event"]] <- node$event_config
-      }
 
       # Set the id (so the walker reuses it for any container DOM events)
       # and the `data-irid-widget` marker the client's detach walker

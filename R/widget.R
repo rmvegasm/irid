@@ -59,40 +59,58 @@ write_back <- function(callable, field, then = NULL) {
   h
 }
 
-#' Layer wrapper-default event-timing config under a caller's `.event`
+#' Declare one widget event
 #'
-#' Three-tier resolution for an element-level `.event` prop:
-#'   1. Caller's `.event` (highest) — a scalar `irid_event_config` wins
-#'      everywhere; a named list wins per event.
-#'   2. Wrapper defaults (middle) — the `...` entries supply per-event
-#'      defaults the wrapper author thinks are sensible for the library
-#'      (e.g. `change = event_debounce(200)` for an editor).
-#'   3. Framework default (lowest) — applied by [process_tags()] for any
-#'      event not covered by the layered result.
+#' A `widget_event` record bundles the wire-name, timing config, and
+#' handler for one event a widget can emit. Wrappers compose a list of
+#' these inline as the `events =` arg to [IridWidget()], so each event's
+#' name / timing / handler appear together in one place rather than
+#' being split across separate slots.
 #'
-#' Generic — plain-tag wrappers can use this too. A `SearchInput`
-#' wrapper might write `event_defaults(.event, input = event_debounce(500))`
-#' to make debounced input the default for its callers.
+#' The handler argument may be `NULL` — `widget_event()` returns `NULL`
+#' in that case so the wrapper can pass an optional caller-provided
+#' handler through declaratively, and `IridWidget()` drops the entry.
 #'
-#' @param user The `.event` value the caller passed (often `NULL`).
-#' @param ... Named `irid_event_config` entries (wrapper defaults).
-#' @return The merged `.event` value, suitable to pass to [IridWidget()].
+#' Wrappers that want to surface caller-side `.event` overrides typically
+#' define a local picker inline (see `examples/codemirror.R`):
+#'
+#' ```r
+#' widget_event(
+#'   name    = "cursor-changed",
+#'   timing  = event_pick(.event, "cursor-changed", event_throttle(100)),
+#'   handler = onCursorChanged
+#' )
+#' ```
+#'
+#' @param name Wire-name of the event the widget JS dispatches (e.g.
+#'   `"change"`, `"cursor-changed"`). Required, non-empty character scalar.
+#' @param handler 0/1/2-arg handler function for the event, or `NULL` to
+#'   skip registration (typically when the caller didn't pass a handler).
+#' @param timing An `irid_event_config` (`event_immediate()` /
+#'   `event_throttle()` / `event_debounce()`). Defaults to
+#'   `event_immediate()` — every widget event fires per-dispatch unless
+#'   the wrapper overrides. Widget event names are library-specific so
+#'   the framework has no per-name intuition to encode (unlike DOM
+#'   `input` → `event_debounce(200)`).
+#' @return A `widget_event` record, or `NULL` when `handler` is `NULL`.
 #' @export
-event_defaults <- function(user, ...) {
-  defaults <- list(...)
-  if (is.null(user)) {
-    # Empty layered config — return NULL so the downstream `.event`
-    # path treats it as "no config" rather than erroring on an
-    # empty named list.
-    return(if (length(defaults) == 0L) NULL else defaults)
+widget_event <- function(name, handler = NULL, timing = event_immediate()) {
+  if (is.null(handler)) return(NULL)
+  if (!is.character(name) || length(name) != 1L || is.na(name) || !nzchar(name)) {
+    stop("`name` must be a non-empty character scalar", call. = FALSE)
   }
-  # Caller scalar broadcasts and wins everywhere; wrapper defaults are
-  # dropped. Validation of `user`'s shape is deferred to the existing
-  # `normalize_element_event` path in process_tags so error messages
-  # match plain-tag `.event` errors.
-  if (inherits(user, "irid_event_config")) return(user)
-  if (is.list(user)) return(utils::modifyList(defaults, user))
-  user
+  if (!is.function(handler)) {
+    stop("`handler` must be a function or NULL; got ",
+         paste(class(handler), collapse = "/"), call. = FALSE)
+  }
+  if (!inherits(timing, "irid_event_config")) {
+    stop("`timing` must be an `irid_event_config`; got ",
+         paste(class(timing), collapse = "/"), call. = FALSE)
+  }
+  structure(
+    list(name = name, handler = handler, timing = timing),
+    class = "widget_event"
+  )
 }
 
 #' Construct a widget — a wrapper for an arbitrary JavaScript library
@@ -123,22 +141,17 @@ event_defaults <- function(user, ...) {
 #'   their full prop shape with optional slots
 #'   (`props = list(content = ..., cursor = cursor)` where `cursor` may
 #'   be `NULL`) and the JS factory sees a predictable, complete object.
-#' @param events Named list of event handlers (client → server). Keys
-#'   are lowercase kebab-case event names (matching the web's
-#'   `CustomEvent` convention). Each value is a 0/1/2-arg handler, or
-#'   `NULL` — `NULL` entries are dropped, so wrappers can forward an
-#'   optional handler declaratively without conditional list-building:
-#'   `events = list(change = ..., `cursor-changed` = onCursorChanged)`
-#'   skips the cursor registration when the caller didn't pass one.
+#' @param events List of [widget_event()] records (client → server). Each
+#'   record bundles wire-name, timing config, and handler for one event
+#'   the widget JS can dispatch. `NULL` entries (from `widget_event()`
+#'   calls whose handler was `NULL`) are dropped, so wrappers can forward
+#'   optional handlers declaratively.
 #' @param deps Optional `html_dependency` or list of them. Required for
 #'   any widget whose JS isn't already loaded by some other means.
 #' @param container Optional `shiny.tag` for the wrapper element.
 #'   Defaults to `tags$div()`. irid sets `id` and `data-irid-widget`
-#'   automatically.
-#' @param .event Element-level event-timing config — same shape as on a
-#'   plain tag (`event_immediate()` / `event_throttle()` / `event_debounce()`,
-#'   or a named list keyed by event). Applies to both widget events and
-#'   any DOM events on the container.
+#'   automatically. Set `.event` on the container directly to control
+#'   timing for any DOM events on the container.
 #' @return A irid widget construct with class `irid_widget`.
 #' @export
 IridWidget <- function(
@@ -146,8 +159,7 @@ IridWidget <- function(
   props = list(),
   events = list(),
   deps = NULL,
-  container = NULL,
-  .event = NULL
+  container = NULL
 ) {
   if (!is.character(name) || length(name) != 1L || is.na(name) || !nzchar(name)) {
     stop("`name` must be a non-empty character scalar", call. = FALSE)
@@ -166,17 +178,14 @@ IridWidget <- function(
     stop("`events` must be a list; got ",
          paste(class(events), collapse = "/"), call. = FALSE)
   }
-  # NULL entries are dropped so wrappers can forward optional handlers
-  # declaratively (see @param events).
+  # NULL entries (from `widget_event()` calls with NULL handler) are
+  # dropped so wrappers can forward optional handlers declaratively.
   events <- events[!vapply(events, is.null, logical(1L))]
   if (length(events) > 0L) {
-    e_nms <- names(events)
-    if (is.null(e_nms) || any(!nzchar(e_nms))) {
-      stop("every entry in `events` must be named", call. = FALSE)
-    }
     for (i in seq_along(events)) {
-      if (!is.function(events[[i]])) {
-        stop("`events$", e_nms[[i]], "` must be a function; got ",
+      if (!inherits(events[[i]], "widget_event")) {
+        stop("every entry in `events` must be a `widget_event` (from `widget_event()`); ",
+             "entry ", i, " had class ",
              paste(class(events[[i]]), collapse = "/"), call. = FALSE)
       }
     }
@@ -205,21 +214,10 @@ IridWidget <- function(
       props = props,
       events = events,
       deps = deps,
-      container = container,
-      event_config = .event
+      container = container
     ),
     class = "irid_widget"
   )
-}
-
-# Per-widget-event default timing. Unlike DOM events (where `input` is
-# debounced and everything else is immediate), widget event names are
-# library-specific (`cursor-changed`, `relayout`, ...) so the framework
-# has no per-name intuition to encode. Every widget event defaults to
-# `event_immediate()`; wrappers layer their own per-event defaults via
-# `event_defaults()`.
-widget_default_for_event <- function(event_name) {
-  event_immediate()
 }
 
 # File-backed dependencies (anything with `src$file` or a `package` arg)
