@@ -37,6 +37,27 @@ irid_mount_processed <- function(result, session, depth = 0L) {
     bindings_by_id[[b$id]] <- c(bindings_by_id[[b$id]], list(b))
   }
 
+  # Send widget init messages. Build the merged `props` object by
+  # `isolate(fn())`-evaluating each callable prop and merging with the
+  # static props. Ordering is naturally correct: top-level mounts send
+  # this with the container already in the static HTML; nested mounts
+  # are invoked from inside the control-flow observer *after* the swap/
+  # mutate that introduced the container, so the init message arrives
+  # at the client after the DOM change.
+  for (wi in result$widget_inits) {
+    props <- wi$static_props
+    for (key in names(wi$prop_fns)) {
+      props[[key]] <- isolate(wi$prop_fns[[key]]())
+    }
+    deps <- lapply(wi$deps, register_widget_dep)
+    session$sendCustomMessage("irid-widget-init", list(
+      id = wi$id,
+      name = wi$name,
+      props = props,
+      deps = deps
+    ))
+  }
+
   # Set up event listeners
   if (length(result$events) > 0L) {
     event_msgs <- lapply(result$events, function(ev) {
@@ -82,16 +103,32 @@ irid_mount_processed <- function(result, session, depth = 0L) {
         # binding observer won't fire and the client gets no echo. This
         # ensures the client always receives the authoritative value so
         # it can apply server transforms even on no-op updates.
+        #
+        # Scoped per-binding via `write_targets` — only echo the bindings
+        # this event's handler is registered to write through (via
+        # `write_back` or autobind). Hand-rolled handlers declare no
+        # targets and get no force-send: their bindings either fire
+        # naturally on change or the wrapper handles the echo itself.
+        # Without this filtering, an event whose handler doesn't write a
+        # particular binding's reactiveVal would still force-send that
+        # binding's current value — and if the binding's write is
+        # debounced and hasn't delivered yet, the server's stale value
+        # would overwrite in-flight client state.
         source_id <- ev_data[["id"]]
         source_bindings <- bindings_by_id[[source_id]]
-        if (!is.null(seq) && length(source_bindings) > 0L) {
+        write_targets <- ev$write_targets
+        if (!is.null(seq) && length(source_bindings) > 0L &&
+            !is.null(write_targets)) {
           for (sb in source_bindings) {
+            if (!(sb$attr %in% write_targets)) next
             val <- isolate(sb$fn())
             msg <- switch(sb$target,
-              dom  = list(id = sb$id, target = "dom",  attr = sb$attr,
-                          value = val, sequence = seq),
-              text = list(id = sb$id, target = "text",
-                          value = val, sequence = seq)
+              dom    = list(id = sb$id, target = "dom",    attr = sb$attr,
+                            value = val, sequence = seq),
+              text   = list(id = sb$id, target = "text",
+                            value = val, sequence = seq),
+              widget = list(id = sb$id, target = "widget", attr = sb$attr,
+                            value = val, sequence = seq)
             )
             session$sendCustomMessage("irid-attr", msg)
           }
@@ -107,7 +144,8 @@ irid_mount_processed <- function(result, session, depth = 0L) {
         ms = ev$ms,
         leading = ev$leading,
         coalesce = ev$coalesce,
-        preventDefault = ev$prevent_default
+        preventDefault = ev$prevent_default,
+        source = ev$source
       )
     })
     session$sendCustomMessage("irid-events", event_msgs)
@@ -126,8 +164,9 @@ irid_mount_processed <- function(result, session, depth = 0L) {
     obs <- observe({
       val <- b$fn()
       msg <- switch(b$target,
-        dom  = list(id = b$id, target = "dom",  attr = b$attr, value = val),
-        text = list(id = b$id, target = "text",                value = val)
+        dom    = list(id = b$id, target = "dom",    attr = b$attr, value = val),
+        text   = list(id = b$id, target = "text",                  value = val),
+        widget = list(id = b$id, target = "widget", attr = b$attr, value = val)
       )
       seq_info <- session$userData$irid_current_sequence
       if (!is.null(seq_info) && seq_info$source == b$id) {

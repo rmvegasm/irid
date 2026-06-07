@@ -145,7 +145,49 @@ the widget dispatches cancelable events.
 
 ---
 
-## 5. Related planned work
+## 5. Precondition — `.event` → `.timing` rename
+
+`.listener` joins an emerging family of element-level structured props
+that configure aspects of how events on the element are handled:
+
+- `.event` — timing/transport (debounce, throttle, immediate)
+- `.listener` — addEventListener options (this design)
+- `.filter` — client-side filtering (see §6, placement open)
+
+The family naming convention being established is **dot-prefix +
+aspect noun**: `.listener` says "listener options," `.filter` says
+"filter config." `.event` is the misfit — it doesn't say what kind of
+config it carries (it doesn't hold "the event"; the event is registered
+via `on*`). It carries *timing*.
+
+Renaming `.event` → `.timing` before this design lands locks in one
+consistent rule:
+
+| Old | New |
+|---|---|
+| `.event = event_throttle(100)` | `.timing = event_throttle(100)` |
+| `.event = list(click = event_debounce(50))` | `.timing = list(click = event_debounce(50))` |
+
+The event-config constructors (`event_immediate()`, `event_throttle()`,
+`event_debounce()`) keep their names — they read fine as "the event
+fires X" and aren't part of the prop-naming concern (cf.
+`listener_opts()` works fine even though the prop is `.listener`).
+Internal `widget_event(timing = ...)` already uses the right word.
+
+The rename is independently desirable (more accurate, consistent with
+`widget_event`'s `timing` slot) and bundles cheaply with the 0.3.0
+release that's already breaking `.event`'s key format (wire-name →
+`on*`) and dropping scalar broadcast. Bundling all three into one
+migration means callers do a single find-replace pass.
+
+Order of operations: rename ships first (in 0.3.0). `.listener` lands
+after, naming-consistent from day one. If `.listener` shipped before
+the rename, justifying the rename later (`"we shipped .event next to
+.listener, why churn now?"`) gets harder.
+
+---
+
+## 6. Related planned work
 
 Three planned designs all touch the same client-side dispatch layer and
 should be reconciled before any of them land:
@@ -191,7 +233,7 @@ motivates both the event queue and the filter design — restoring
 
 ---
 
-## 6. Rejected alternatives
+## 7. Rejected alternatives
 
 ### 6.1 Flat sibling props
 
@@ -234,7 +276,7 @@ idiom.
 
 ---
 
-## 7. Migration
+## 8. Migration
 
 `.prevent_default` is deprecated with a warning that points to
 `.listener = listener_opts(prevent_default = ...)`. Both shapes (scalar

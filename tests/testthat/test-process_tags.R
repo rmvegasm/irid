@@ -111,6 +111,22 @@ test_that("checked reads from e$checked, value reads from e$value", {
   expect_equal(shiny::isolate(rv_value()), "opt-2")
 })
 
+test_that("autobind handler is tagged with irid_write_targets = attr_name", {
+  # Drives the per-binding force-send: when this autobind handler fires,
+  # only the matching binding gets force-sent (not every binding on the
+  # element). Both writable and read-only autobind handlers declare the
+  # target — read-only needs it for the snap-back path.
+  rv <- shiny::reactiveVal("init")
+  res <- process_tags(tags$input(value = rv))
+  expect_equal(attr(res$events[[1]]$handler, "irid_write_targets"), "value")
+  expect_equal(res$events[[1]]$write_targets, "value")
+
+  ro <- shiny::reactive(rv())
+  res_ro <- process_tags(tags$input(value = ro))
+  expect_equal(attr(res_ro$events[[1]]$handler, "irid_write_targets"), "value")
+  expect_equal(res_ro$events[[1]]$write_targets, "value")
+})
+
 test_that("autobind handler reads correct key when prop is not last", {
   # Regression: `make_autobind_handler` used to capture `attr_name` lazily,
   # so the closure resolved it via the for-loop's final `name` binding —
@@ -218,6 +234,34 @@ test_that("two explicit handlers on the same DOM event compose in source order",
   expect_length(result$events, 1L)
   result$events[[1]]$handler(list(value = "x"), "id")
   expect_equal(calls, c("h1", "h2"))
+})
+
+test_that("composed handler unions write_targets from each constituent", {
+  # autobind on `value` + an explicit handler on `input` merges into one
+  # composed handler. The composed handler should carry the autobind's
+  # `value` target so force-send fires for the `value` binding (the
+  # explicit handler has no target → no contribution).
+  rv <- shiny::reactiveVal("")
+  res <- process_tags(
+    tags$input(value = rv, onInput = function(e) NULL)
+  )
+  expect_equal(attr(res$events[[1]]$handler, "irid_write_targets"), "value")
+  expect_equal(res$events[[1]]$write_targets, "value")
+})
+
+test_that("composed handler with only hand-rolled constituents declares no write_targets", {
+  # Two explicit handlers, neither using write_back — composed handler
+  # has no declared targets, so force-send won't fire. Wrapper authors
+  # who hand-roll multi-write handlers are responsible for echoing
+  # themselves (natural binding observers cover the writable cases).
+  calls <- character()
+  h1 <- function(e) calls <<- c(calls, "h1")
+  h2 <- function(e) calls <<- c(calls, "h2")
+  result <- process_tags(
+    htmltools::tag("input", list(onInput = h1, onInput = h2))
+  )
+  expect_null(attr(result$events[[1]]$handler, "irid_write_targets"))
+  expect_null(result$events[[1]]$write_targets)
 })
 
 test_that("explicit-handler arity is preserved through composition", {

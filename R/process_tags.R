@@ -37,14 +37,6 @@ state_bind_event <- function(attr_name, tag_name) {
   "input"
 }
 
-# Can the callable accept a positional argument? Primitives have no
-# explicit formals but accept arguments at the C level; closures with at
-# least one formal (including `...`) can be called with the write value.
-# A 0-formal closure would error if called with an argument.
-can_accept_write <- function(fn) {
-  is.primitive(fn) || length(formals(fn)) >= 1L
-}
-
 # Build the synthetic write-back handler for a state-binding prop.
 # Writable callables (reactiveVal, reactiveProxy, reactiveStore node,
 # `\(v) ...`, `\(...) ...`, primitives) get a handler that calls
@@ -54,11 +46,17 @@ can_accept_write <- function(fn) {
 make_autobind_handler <- function(fn, attr_name) {
   force(fn)
   force(attr_name)
-  if (can_accept_write(fn)) {
+  h <- if (can_accept_write(fn)) {
     function(e) fn(e[[attr_name]])
   } else {
     function(e) NULL
   }
+  # Declare the write target for the framework's force-send-on-no-op
+  # loop. Both writable and read-only autobind handlers declare it —
+  # read-only specifically NEEDS force-send to snap the input back to
+  # the canonical value.
+  attr(h, "irid_write_targets") <- attr_name
+  h
 }
 
 # Shared validation for element-level keyed-list props (`.event`,
@@ -219,7 +217,11 @@ resolve_event_config <- function(event_name, lookup) {
 # fans out per source handler.
 compose_handlers <- function(handlers) {
   arities <- vapply(handlers, function(h) length(formals(h)), integer(1L))
-  function(event, id) {
+  targets <- unique(unlist(
+    lapply(handlers, function(h) attr(h, "irid_write_targets")),
+    use.names = FALSE
+  ))
+  composed <- function(event, id) {
     for (i in seq_along(handlers)) {
       h <- handlers[[i]]
       a <- arities[[i]]
@@ -228,6 +230,13 @@ compose_handlers <- function(handlers) {
       else h(event, id)
     }
   }
+  # Union of constituent write targets so force-send fans out across all
+  # bindings the composed handler covers. A composed handler with no
+  # write_back/autobind constituents has no targets → no force-send.
+  if (length(targets) > 0L) {
+    attr(composed, "irid_write_targets") <- targets
+  }
+  composed
 }
 
 # Merge pending events that share a DOM event name (e.g. auto-bind synthetic
@@ -309,6 +318,7 @@ process_tags <- function(tag, counter = irid_id_counter()) {
   events <- list()
   control_flows <- list()
   shiny_outputs <- list()
+  widget_inits <- list()
 
   walk <- function(node) {
     if (is.null(node)) return(NULL)
@@ -320,6 +330,67 @@ process_tags <- function(tag, counter = irid_id_counter()) {
         render_call = node$render_call
       )
       return(do.call(node$output_fn, c(list(id), node$output_fn_args)))
+    }
+
+    if (inherits(node, "irid_widget")) {
+      container <- node$container
+      if (is.null(container)) container <- htmltools::tags$div()
+
+      # Honor user-supplied id on the container, otherwise allocate.
+      user_id <- container$attribs$id
+      id <- if (!is.null(user_id)) user_id else next_id()
+
+      # Per-key dispatch on `is_irid_reactive()`. Callables become
+      # `target = "widget"` bindings (one observer per key); non-callables
+      # ride in the init message as constants. `static_props[key] <- list(val)`
+      # (single-bracket) preserves NULL entries — `[[<-` would drop them
+      # via R's NULL-removes-key quirk. Shiny's `null = "null"` JSON option
+      # then serializes them to JS `null`, giving the widget factory a
+      # complete, predictable props object.
+      prop_fns <- list()
+      static_props <- list()
+      for (key in names(node$props)) {
+        val <- node$props[[key]]
+        if (is_irid_reactive(val)) {
+          prop_fns[[key]] <- val
+          bindings[[length(bindings) + 1L]] <<- list(
+            id = id, target = "widget", attr = key, fn = val
+          )
+        } else {
+          static_props[key] <- list(val)
+        }
+      }
+
+      # Widget event timing comes from each `widget_event` record's
+      # `timing` slot (composed inline by the wrapper, typically via
+      # `event_pick()`). `widget_event()` defaults timing to
+      # `event_immediate()` so `ev$timing` is always non-NULL.
+      for (ev in node$events) {
+        cfg <- ev$timing
+        events[[length(events) + 1L]] <<- list(
+          id = id, event = ev$name, handler = ev$handler,
+          write_targets = attr(ev$handler, "irid_write_targets"),
+          mode = cfg$mode, ms = cfg$ms,
+          leading = cfg$leading, coalesce = cfg$coalesce,
+          prevent_default = FALSE,
+          source = "widget"
+        )
+      }
+
+      widget_inits[[length(widget_inits) + 1L]] <<- list(
+        id = id, name = node$name,
+        prop_fns = prop_fns, static_props = static_props,
+        deps = node$deps
+      )
+
+      # Set the id (so the walker reuses it for any container DOM events)
+      # and the `data-irid-widget` marker the client's detach walker
+      # looks for. irid owns this attribute — if the user set it on the
+      # container, irid overwrites.
+      container$attribs$id <- id
+      container$attribs[["data-irid-widget"]] <- node$name
+
+      return(walk(container))
     }
 
     if (inherits(node, "irid_each")) {
@@ -501,6 +572,8 @@ process_tags <- function(tag, counter = irid_id_counter()) {
       }
       for (e in pending_events) {
         e$id <- id
+        e$source <- "dom"
+        e$write_targets <- attr(e$handler, "irid_write_targets")
         events[[length(events) + 1L]] <<- e
       }
     }
@@ -515,6 +588,7 @@ process_tags <- function(tag, counter = irid_id_counter()) {
   cleaned_tag <- walk(tag)
   list(tag = cleaned_tag, bindings = bindings, events = events,
        control_flows = control_flows, shiny_outputs = shiny_outputs,
+       widget_inits = widget_inits,
        counter = counter)
 }
 
