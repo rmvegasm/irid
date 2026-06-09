@@ -38,12 +38,19 @@ reference:
       - TableOutput
       - DTOutput
 
-  - title: Events
-    desc: Control event dispatch rate limiting
+  - title: Wiring
+    desc: Configure per-slot dispatch and two-way widget props
     contents:
-      - event_immediate
-      - event_throttle
-      - event_debounce
+      - irid_wire
+      - irid_immediate
+      - irid_throttle
+      - irid_debounce
+      - irid_dom_opts
+
+  - title: Widgets
+    desc: Build custom irid widgets
+    contents:
+      - IridWidget
 
   - title: Reactive Basics
     desc: Reactive primitives — Shiny's `reactiveVal` plus irid's hierarchical store and callable proxy
